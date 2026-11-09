@@ -62,8 +62,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 3
-                  versionName '1.2'
+                  versionCode 5
+                  versionName '1.4'
               }
 
               compileOptions {
@@ -115,6 +115,7 @@ jobs:
           import android.app.DownloadManager;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
+          import android.graphics.Color;
           import android.graphics.Typeface;
           import android.net.Uri;
           import android.os.Build;
@@ -130,6 +131,7 @@ jobs:
           import android.view.View;
           import android.view.WindowManager;
           import android.webkit.CookieManager;
+          import android.webkit.WebResourceError;
           import android.webkit.WebChromeClient;
           import android.webkit.WebResourceRequest;
           import android.webkit.WebResourceResponse;
@@ -140,6 +142,7 @@ jobs:
           import android.widget.Button;
           import android.widget.CheckBox;
           import android.widget.EditText;
+          import android.widget.FrameLayout;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.Spinner;
@@ -180,6 +183,11 @@ jobs:
                       + "trafficjunky|trafficstars|tsyndicate|hilltopads|clickadu|adcash|a-ads|adskeeper|mgid|"
                       + "taboola|outbrain|clickunder|prebid|monetag|onclicka|richads|galaksion|admaven|bidvertiser)",
                       Pattern.CASE_INSENSITIVE);
+              static final Pattern FOLDER_KEYWORD = Pattern.compile(
+                      "/(folder|folders|dir|directory|album|albums|collection|collections)(/|\\?|$)", Pattern.CASE_INSENSITIVE);
+              static final Pattern BACK_TEXT = Pattern.compile(
+                      "^(\\.\\.|kembali|back|up|parent|home|beranda|induk)$", Pattern.CASE_INSENSITIVE);
+              static final int MAX_SCAN_PAGES = 400, MAX_DEPTH = 12;
               static final long CAPTURE_TIMEOUT_MS = 60000;
               static final long SETTLE_MS = 10000;          // tunggu sejak kandidat terakhir muncul
               static final double AD_MAX_DURATION = 45;     // video < 45 detik dianggap iklan
@@ -187,7 +195,9 @@ jobs:
 
               static final String JS_LINKS =
                       "(function(){var a=document.querySelectorAll('a[href]');var r=[];" +
-                      "for(var i=0;i<a.length;i++){r.push([a[i].href,((a[i].innerText||a[i].title||'')+'').trim().slice(0,100)]);}" +
+                      "var navSel='nav,header,footer,[class*=breadcrumb i],[id*=breadcrumb i],[class*=crumb i]';" +
+                      "for(var i=0;i<a.length;i++){var nv=0;try{nv=a[i].closest(navSel)?1:0;}catch(e){}" +
+                      "r.push([a[i].href,((a[i].innerText||a[i].title||'')+'').trim().slice(0,100),nv]);}" +
                       "return r;})()";
               static final String JS_SCROLL =
                       "(function(){window.scrollTo(0,document.body.scrollHeight);return document.body.scrollHeight;})()";
@@ -237,8 +247,12 @@ jobs:
 
               final Handler h = new Handler(Looper.getMainLooper());
               EditText urlInput, patternInput;
-              Button scanBtn, dlBtn;
-              CheckBox adBox;
+              Button scanBtn, dlBtn, darkBtn;
+              TextView darkOverlay;
+              boolean paused;
+              int stepSeq, retries, retryIdx = -1;
+              CheckBox adBox, treeBox;
+              EditText folderPatternInput;
               Spinner baseSpin;
               EditText folderInput;
               SharedPreferences prefs;
@@ -254,11 +268,14 @@ jobs:
               final Set<String> allowedHosts = new HashSet<>();
 
               // scan
-              final ArrayDeque<String> pageQueue = new ArrayDeque<>();
+              final ArrayDeque<String[]> pageQueue = new ArrayDeque<>();   // {url, relPath, depth}
               final Set<String> seenPages = new HashSet<>();
-              final LinkedHashMap<String, String> found = new LinkedHashMap<>();
+              final LinkedHashMap<String, String[]> found = new LinkedHashMap<>(); // url -> {text, relPath}
               final LinkedHashMap<String, String> allLinks = new LinkedHashMap<>();
-              int scanSeq = 0;
+              String[] curPage;
+              String folderPrefix = "";
+              Pattern folderPattern;
+              int scanSeq = 0, foldersScanned = 0;
 
               // capture
               final List<String[]> videos = new ArrayList<>();
@@ -291,11 +308,24 @@ jobs:
                   urlInput.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
                   root.addView(urlInput);
 
+                  LinearLayout prow = new LinearLayout(this);
+                  prow.setOrientation(LinearLayout.HORIZONTAL);
                   patternInput = new EditText(this);
-                  patternInput.setHint("Pola link video (opsional)");
+                  patternInput.setHint("Pola link video (ops.)");
                   patternInput.setSingleLine(true);
                   patternInput.setTextSize(13);
-                  root.addView(patternInput);
+                  folderPatternInput = new EditText(this);
+                  folderPatternInput.setHint("Pola link folder (ops.)");
+                  folderPatternInput.setSingleLine(true);
+                  folderPatternInput.setTextSize(13);
+                  prow.addView(patternInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                  prow.addView(folderPatternInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                  root.addView(prow);
+
+                  treeBox = new CheckBox(this);
+                  treeBox.setText("Simpan mengikuti struktur subfolder");
+                  treeBox.setChecked(true);
+                  root.addView(treeBox);
 
                   adBox = new CheckBox(this);
                   adBox.setText("Blokir iklan (matikan jika situs jadi error)");
@@ -333,6 +363,9 @@ jobs:
                   dlBtn.setEnabled(false);
                   row.addView(scanBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
                   row.addView(dlBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                  darkBtn = new Button(this);
+                  darkBtn.setText("Layar gelap");
+                  row.addView(darkBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
                   root.addView(row);
 
                   web = new WebView(this);
@@ -347,7 +380,22 @@ jobs:
                   logScroll.addView(logView);
                   root.addView(logScroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
 
-                  setContentView(root);
+                  // lapisan hitam: layar tampak mati tapi aplikasi tetap bekerja
+                  darkOverlay = new TextView(this);
+                  darkOverlay.setBackgroundColor(Color.BLACK);
+                  darkOverlay.setTextColor(Color.rgb(70, 70, 70));
+                  darkOverlay.setGravity(Gravity.CENTER);
+                  darkOverlay.setText("Aplikasi tetap bekerja.\nSentuh layar untuk kembali.");
+                  darkOverlay.setVisibility(View.GONE);
+                  darkOverlay.setClickable(true);
+                  darkOverlay.setOnClickListener(v -> setDark(false));
+
+                  FrameLayout frame = new FrameLayout(this);
+                  frame.addView(root);
+                  frame.addView(darkOverlay, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                  setContentView(frame);
+                  darkBtn.setOnClickListener(v -> setDark(true));
                   scanBtn.setOnClickListener(v -> startScan());
                   dlBtn.setOnClickListener(v -> startDownloadAll());
               }
@@ -373,6 +421,11 @@ jobs:
                       public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                           if (mode == Mode.IDLE) return false;
                           return !isAllowed(req.getUrl().toString()); // blokir redirect iklan saat bekerja
+                      }
+
+                      @Override
+                      public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
+                          if (req.isForMainFrame()) onMainFrameError(String.valueOf(err.getDescription()));
                       }
 
                       @Override
@@ -404,7 +457,7 @@ jobs:
                   }
               }
 
-              // ---------------- PINDAI FOLDER ----------------
+              // ---------------- PINDAI FOLDER (termasuk subfolder) ----------------
 
               void startScan() {
                   String url = urlInput.getText().toString().trim();
@@ -414,27 +467,41 @@ jobs:
                       return;
                   }
                   String p = patternInput.getText().toString().trim();
+                  String fp = folderPatternInput.getText().toString().trim();
                   try {
                       linkPattern = Pattern.compile(p.isEmpty() ? DEFAULT_PATTERN : p, Pattern.CASE_INSENSITIVE);
+                      folderPattern = fp.isEmpty() ? null : Pattern.compile(fp, Pattern.CASE_INSENSITIVE);
                   } catch (Exception e) {
                       log("Pola tidak valid: " + e.getMessage());
                       return;
                   }
                   baseDomain = baseDomain(u.getHost());
                   folderPath = u.getPath() == null ? "" : u.getPath();
+                  // awalan link folder, mis. /folder/ABC -> /folder/
+                  String trimmed = stripSlash(folderPath);
+                  int cut = trimmed.lastIndexOf('/');
+                  folderPrefix = cut > 0 ? trimmed.substring(0, cut + 1) : "";
                   allowedHosts.clear();
                   pageQueue.clear();
                   seenPages.clear();
                   found.clear();
                   allLinks.clear();
                   videos.clear();
+                  foldersScanned = 0;
                   dlBtn.setEnabled(false);
                   scanBtn.setEnabled(false);
                   logView.setText("");
-                  log("Membuka folder...");
                   mode = Mode.SCAN;
-                  seenPages.add(url);
-                  web.loadUrl(url);
+                  seenPages.add(stripSlash(url));
+                  openScanPage(new String[]{url, "", "0"});
+              }
+
+              void openScanPage(String[] page) {
+                  curPage = page;
+                  foldersScanned++;
+                  String where = page[1].isEmpty() ? "(folder utama)" : page[1];
+                  log("Memindai " + where + " ...");
+                  web.loadUrl(page[0]);
               }
 
               void onScanPageLoaded() {
@@ -456,16 +523,29 @@ jobs:
                   });
               }
 
+              boolean isFolderLink(String href, String path, String text, boolean inNav) {
+                  if (folderPattern != null) return folderPattern.matcher(href).find();
+                  if (inNav || BACK_TEXT.matcher(text.trim()).find()) return false;
+                  if (FOLDER_KEYWORD.matcher(path).find()) return true;
+                  return folderPrefix.length() > 1 && path.startsWith(folderPrefix)
+                          && path.length() > folderPrefix.length();
+              }
+
               void collectLinks(final int seq) {
-                  final String current = web.getUrl() == null ? "" : web.getUrl();
+                  final String current = web.getUrl() == null ? curPage[0] : web.getUrl();
+                  final String curPath = Uri.parse(current).getPath() == null ? "" : Uri.parse(current).getPath();
+                  final String rel = curPage[1];
+                  final int depth = Integer.parseInt(curPage[2]);
                   web.evaluateJavascript(JS_LINKS, v -> {
                       if (seq != scanSeq) return;
+                      int newVideos = 0, newFolders = 0;
                       try {
                           JSONArray arr = new JSONArray(v);
                           for (int i = 0; i < arr.length(); i++) {
                               JSONArray it = arr.getJSONArray(i);
                               String href = it.getString(0);
                               String text = it.optString(1, "");
+                              boolean inNav = it.optInt(2, 0) == 1;
                               int hash = href.indexOf('#');
                               if (hash >= 0) href = href.substring(0, hash);
                               Uri u = Uri.parse(href);
@@ -473,33 +553,44 @@ jobs:
                               String scheme = u.getScheme();
                               if (host == null || scheme == null || !scheme.startsWith("http")) continue;
                               if (!sameSite(host)) continue;
-                              if (stripSlash(href).equals(stripSlash(current))) continue;
+                              String key = stripSlash(href);
+                              if (key.equals(stripSlash(current))) continue;
                               String path = u.getPath() == null ? "" : u.getPath();
                               if (SKIP.matcher(path).find()) continue;
                               if (!allLinks.containsKey(href)) allLinks.put(href, text);
                               String q = u.getQuery() == null ? "" : u.getQuery();
-                              if (path.equals(folderPath) && q.matches("(?i).*(^|&)(page|p)=\\d+.*")) {
-                                  if (!seenPages.contains(href)) pageQueue.add(href);
+                              if (path.equals(curPath) && q.matches("(?i).*(^|&)(page|p)=\\d+.*")) {
+                                  if (!seenPages.contains(key)) {        // halaman berikutnya dari folder yang sama
+                                      seenPages.add(key);
+                                      pageQueue.addFirst(new String[]{href, rel, String.valueOf(depth)});
+                                  }
+                              } else if (isFolderLink(href, path, text, inNav)) {
+                                  if (!seenPages.contains(key) && depth < MAX_DEPTH) {
+                                      seenPages.add(key);
+                                      String name = sanitize(text.isEmpty() ? lastSegment(path) : text);
+                                      String childRel = rel.isEmpty() ? name : rel + "/" + name;
+                                      pageQueue.add(new String[]{href, childRel, String.valueOf(depth + 1)});
+                                      newFolders++;
+                                  }
                               } else if (linkPattern.matcher(href).find() && !found.containsKey(href)) {
-                                  found.put(href, text);
+                                  found.put(href, new String[]{text, rel});
+                                  newVideos++;
                               }
                           }
                       } catch (Exception e) {
                           log("Gagal membaca halaman: " + e.getMessage());
                       }
+                      log("   " + newVideos + " video, " + newFolders + " subfolder");
                       nextScanPage();
                   });
               }
 
               void nextScanPage() {
-                  while (!pageQueue.isEmpty() && seenPages.size() < 50) {
-                      String next = pageQueue.poll();
-                      if (seenPages.contains(next)) continue;
-                      seenPages.add(next);
-                      log("Membuka halaman berikutnya...");
-                      web.loadUrl(next);
+                  if (!pageQueue.isEmpty() && foldersScanned < MAX_SCAN_PAGES) {
+                      openScanPage(pageQueue.poll());
                       return;
                   }
+                  if (!pageQueue.isEmpty()) log("Batas " + MAX_SCAN_PAGES + " halaman tercapai, sisa folder dilewati.");
                   finishScan();
               }
 
@@ -514,18 +605,29 @@ jobs:
                           if (n++ >= 60) break;
                           log("  " + e.getKey() + "  |  " + e.getValue());
                       }
-                      log("\nIsi kolom 'Pola link video' dengan bagian khas dari link video (mis. /watch/), lalu pindai lagi.");
+                      log("\nIsi kolom 'Pola link video' (dan/atau 'Pola link folder') dengan bagian khas dari link-nya, lalu pindai lagi.");
                       return;
                   }
-                  for (Map.Entry<String, String> e : found.entrySet()) {
-                      videos.add(new String[]{e.getKey(), e.getValue()});
+                  for (Map.Entry<String, String[]> e : found.entrySet()) {
+                      videos.add(new String[]{e.getKey(), e.getValue()[0], e.getValue()[1]});
                   }
-                  log("Ditemukan " + videos.size() + " video:");
+                  log("\nSelesai memindai " + foldersScanned + " halaman. Ditemukan " + videos.size() + " video:");
+                  String lastRel = null;
                   for (int i = 0; i < videos.size(); i++) {
-                      String t = videos.get(i)[1];
-                      log(String.format("%3d. %s", i + 1, t.isEmpty() ? videos.get(i)[0] : t));
+                      String[] v = videos.get(i);
+                      if (!v[2].equals(lastRel)) {
+                          lastRel = v[2];
+                          log("[" + (lastRel.isEmpty() ? "folder utama" : lastRel) + "]");
+                      }
+                      log(String.format("%4d. %s", i + 1, v[1].isEmpty() ? v[0] : v[1]));
                   }
                   dlBtn.setEnabled(true);
+              }
+
+              static String lastSegment(String path) {
+                  String t = stripSlash(path);
+                  int i = t.lastIndexOf('/');
+                  return i >= 0 ? t.substring(i + 1) : t;
               }
 
               // ---------------- TANGKAP & UNDUH ----------------
@@ -544,6 +646,8 @@ jobs:
                           .putString("folder", cleanFolder(folderInput.getText().toString())).apply();
                   log("Disimpan ke: " + destLabel());
                   mode = Mode.CAPTURE;
+                  paused = false;
+                  retryIdx = -1;
                   idx = 0;
                   ok = 0;
                   fail = 0;
@@ -557,6 +661,11 @@ jobs:
               }
 
               void nextVideo() {
+                  if (paused || mode != Mode.CAPTURE) return;
+                  if (idx != retryIdx) {
+                      retryIdx = idx;
+                      retries = 0;
+                  }
                   if (idx >= videos.size()) {
                       mode = Mode.IDLE;
                       capSeq++;
@@ -577,7 +686,8 @@ jobs:
                   pollCount = 0;
                   deadline = System.currentTimeMillis() + CAPTURE_TIMEOUT_MS;
                   final int seq = ++capSeq;
-                  log("\n[" + (idx + 1) + "/" + videos.size() + "] " + (v[1].isEmpty() ? v[0] : v[1]));
+                  log("\n[" + (idx + 1) + "/" + videos.size() + "] " + (v[2].isEmpty() ? "" : v[2] + " / ")
+                          + (v[1].isEmpty() ? v[0] : v[1]));
                   web.loadUrl(v[0]);
                   h.postDelayed(() -> poll(seq), 3000);
               }
@@ -806,6 +916,9 @@ jobs:
                       r.setDescription("Filecoster Downloader");
                       r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
                       String sub = cleanFolder(folderInput.getText().toString());
+                      if (treeBox.isChecked() && v.length > 2 && !v[2].isEmpty()) {
+                          sub = cleanFolder(sub.isEmpty() ? v[2] : sub + "/" + v[2]);
+                      }
                       r.setDestinationInExternalPublicDir(BASE_DIRS[baseSpin.getSelectedItemPosition()],
                               sub.isEmpty() ? name : sub + "/" + name);
                       dm.enqueue(r);
@@ -821,7 +934,57 @@ jobs:
               void advance() {
                   idx++;
                   capSeq++;
-                  h.postDelayed(this::nextVideo, 1500);
+                  scheduleNext(1500);
+              }
+
+              void scheduleNext(long delay) {
+                  final int s = ++stepSeq;
+                  h.postDelayed(() -> { if (s == stepSeq && !paused) nextVideo(); }, delay);
+              }
+
+              void onMainFrameError(String desc) {
+                  if (mode == Mode.SCAN) {
+                      log("Halaman gagal dimuat (" + desc + "). Periksa koneksi, jangan matikan layar, lalu pindai lagi.");
+                      return;
+                  }
+                  if (mode != Mode.CAPTURE || paused) return;
+                  if (retries < 2) {
+                      retries++;
+                      log("   halaman gagal dimuat (" + desc + "), mencoba lagi (" + retries + "/2)...");
+                      capSeq++;
+                      scheduleNext(4000);
+                  }
+              }
+
+              // Saat layar dimatikan / aplikasi ditinggal, Android memutus koneksi & menghentikan halaman web.
+              // Proses dijeda dan dilanjutkan otomatis saat aplikasi dibuka lagi.
+              @Override
+              protected void onStop() {
+                  super.onStop();
+                  if (mode == Mode.CAPTURE && !paused) {
+                      paused = true;
+                      capSeq++;
+                      stepSeq++;
+                      log("\n|| Dijeda: layar mati atau aplikasi ditinggal. Akan dilanjutkan saat aplikasi dibuka lagi.");
+                  }
+              }
+
+              @Override
+              protected void onStart() {
+                  super.onStart();
+                  if (mode == Mode.CAPTURE && paused) {
+                      paused = false;
+                      retryIdx = -1;
+                      log("> Melanjutkan dari video ke-" + (idx + 1) + "...");
+                      scheduleNext(1500);
+                  }
+              }
+
+              void setDark(boolean on) {
+                  darkOverlay.setVisibility(on ? View.VISIBLE : View.GONE);
+                  WindowManager.LayoutParams lp = getWindow().getAttributes();
+                  lp.screenBrightness = on ? 0.01f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+                  getWindow().setAttributes(lp);
               }
 
               // ---------------- BANTUAN ----------------
@@ -895,7 +1058,8 @@ jobs:
 
               @Override
               public void onBackPressed() {
-                  if (mode == Mode.IDLE && web.canGoBack()) web.goBack();
+                  if (darkOverlay.getVisibility() == View.VISIBLE) setDark(false);
+                  else if (mode == Mode.IDLE && web.canGoBack()) web.goBack();
                   else super.onBackPressed();
               }
           }
