@@ -1,0 +1,681 @@
+# Filecoster Downloader - build APK otomatis di GitHub.
+# Cukup simpan file ini sebagai .github/workflows/build.yml di repository baru.
+# Setiap kali di-commit, GitHub akan membuat APK dan menaruhnya di halaman Releases.
+
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Buat source project Android
+        run: |
+          cat > settings.gradle << 'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'FilecosterDownloader'
+          include ':app'
+          EOF_FILE
+
+          cat > build.gradle << 'EOF_FILE'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF_FILE
+
+          cat > gradle.properties << 'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF_FILE
+
+          mkdir -p app
+          cat > app/build.gradle << 'EOF_FILE'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.fcdownloader'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.example.fcdownloader'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              lint {
+                  abortOnError false
+                  checkReleaseBuilds false
+              }
+          }
+          EOF_FILE
+
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml << 'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission
+                  android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="28" />
+
+              <application
+                  android:label="Filecoster Downloader"
+                  android:theme="@android:style/Theme.DeviceDefault.Light"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_FILE
+
+          mkdir -p app/src/main/java/com/example/fcdownloader
+          cat > app/src/main/java/com/example/fcdownloader/MainActivity.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.DownloadManager;
+          import android.content.pm.PackageManager;
+          import android.graphics.Typeface;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.os.Message;
+          import android.text.InputType;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.webkit.CookieManager;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.util.ArrayDeque;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.HashMap;
+          import java.util.HashSet;
+          import java.util.LinkedHashMap;
+          import java.util.LinkedHashSet;
+          import java.util.List;
+          import java.util.Map;
+          import java.util.Set;
+          import java.util.regex.Pattern;
+
+          public class MainActivity extends Activity {
+
+              static final String DEFAULT_PATTERN =
+                      "/(v|f|d|e|file|files|video|videos|watch|embed|play|stream)/|\\.(mp4|webm|mkv|mov|m4v)(\\?|$)";
+              static final Pattern MEDIA = Pattern.compile("\\.(mp4|webm|mkv|mov|m4v|m3u8)(\\?|#|$)", Pattern.CASE_INSENSITIVE);
+              static final Pattern SEGMENT = Pattern.compile("\\.(ts|m4s|aac)(\\?|$)", Pattern.CASE_INSENSITIVE);
+              static final Pattern SKIP = Pattern.compile(
+                      "(login|register|signup|logout|premium|upgrade|contact|terms|privacy|dmca|faq|about)", Pattern.CASE_INSENSITIVE);
+              static final long CAPTURE_TIMEOUT_MS = 40000;
+
+              static final String JS_LINKS =
+                      "(function(){var a=document.querySelectorAll('a[href]');var r=[];" +
+                      "for(var i=0;i<a.length;i++){r.push([a[i].href,((a[i].innerText||a[i].title||'')+'').trim().slice(0,100)]);}" +
+                      "return r;})()";
+              static final String JS_SCROLL =
+                      "(function(){window.scrollTo(0,document.body.scrollHeight);return document.body.scrollHeight;})()";
+              static final String JS_POLL =
+                      "(function(){var out={media:[],iframes:[]};" +
+                      "function scan(doc){try{var v=doc.querySelectorAll('video, video source');" +
+                      "for(var i=0;i<v.length;i++){var s=v[i].currentSrc||v[i].src;if(s&&s.indexOf('http')===0)out.media.push(s);}" +
+                      "var f=doc.querySelectorAll('iframe');" +
+                      "for(var j=0;j<f.length;j++){if(f[j].src&&f[j].src.indexOf('http')===0)out.iframes.push(f[j].src);" +
+                      "try{if(f[j].contentDocument)scan(f[j].contentDocument);}catch(e){}}}catch(e){}}" +
+                      "scan(document);return out;})()";
+              static final String JS_PLAY =
+                      "(function(){var sels=['.vjs-big-play-button','.plyr__control--overlaid','.jw-icon-display'," +
+                      "'[class*=play i]','[id*=play i]'];" +
+                      "function go(doc){try{for(var i=0;i<sels.length;i++){var el=doc.querySelector(sels[i]);" +
+                      "if(el){try{el.click();}catch(e){}break;}}" +
+                      "var v=doc.querySelectorAll('video');for(var k=0;k<v.length;k++){v[k].muted=true;" +
+                      "var p=v[k].play();if(p&&p.catch)p.catch(function(){});}" +
+                      "var f=doc.querySelectorAll('iframe');for(var j=0;j<f.length;j++){" +
+                      "try{if(f[j].contentDocument)go(f[j].contentDocument);}catch(e){}}}catch(e){}}" +
+                      "go(document);return true;})()";
+
+              enum Mode { IDLE, SCAN, CAPTURE }
+
+              final Handler h = new Handler(Looper.getMainLooper());
+              EditText urlInput, patternInput;
+              Button scanBtn, dlBtn;
+              TextView logView;
+              ScrollView logScroll;
+              WebView web;
+
+              Mode mode = Mode.IDLE;
+              String baseDomain = "", folderPath = "";
+              Pattern linkPattern;
+              final Set<String> allowedHosts = new HashSet<>();
+
+              // scan
+              final ArrayDeque<String> pageQueue = new ArrayDeque<>();
+              final Set<String> seenPages = new HashSet<>();
+              final LinkedHashMap<String, String> found = new LinkedHashMap<>();
+              final LinkedHashMap<String, String> allLinks = new LinkedHashMap<>();
+              int scanSeq = 0;
+
+              // capture
+              final List<String[]> videos = new ArrayList<>();
+              final Set<String> captured = Collections.synchronizedSet(new LinkedHashSet<String>());
+              int idx, ok, fail, pollCount, capSeq = 0;
+              boolean jumpedToIframe;
+              long deadline;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  buildUi();
+                  setupWebView();
+                  log("1) Tempel link folder, tekan PINDAI.\n2) Periksa daftar video, lalu tekan UNDUH SEMUA.\n" +
+                      "Biarkan aplikasi tetap terbuka selama proses mencari video.");
+              }
+
+              void buildUi() {
+                  int pad = dp(10);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(pad, pad, pad, pad);
+                  root.setFitsSystemWindows(true);
+
+                  urlInput = new EditText(this);
+                  urlInput.setHint("Link folder (https://...)");
+                  urlInput.setSingleLine(true);
+                  urlInput.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+                  root.addView(urlInput);
+
+                  patternInput = new EditText(this);
+                  patternInput.setHint("Pola link video (opsional)");
+                  patternInput.setSingleLine(true);
+                  patternInput.setTextSize(13);
+                  root.addView(patternInput);
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  scanBtn = new Button(this);
+                  scanBtn.setText("Pindai");
+                  dlBtn = new Button(this);
+                  dlBtn.setText("Unduh semua");
+                  dlBtn.setEnabled(false);
+                  row.addView(scanBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                  row.addView(dlBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                  root.addView(row);
+
+                  web = new WebView(this);
+                  root.addView(web, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
+
+                  logScroll = new ScrollView(this);
+                  logView = new TextView(this);
+                  logView.setTypeface(Typeface.MONOSPACE);
+                  logView.setTextSize(12);
+                  logView.setTextIsSelectable(true);
+                  logView.setPadding(0, dp(6), 0, 0);
+                  logScroll.addView(logView);
+                  root.addView(logScroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
+
+                  setContentView(root);
+                  scanBtn.setOnClickListener(v -> startScan());
+                  dlBtn.setOnClickListener(v -> startDownloadAll());
+              }
+
+              void setupWebView() {
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setSupportMultipleWindows(true);
+                  s.setJavaScriptCanOpenWindowsAutomatically(false);
+                  CookieManager.getInstance().setAcceptCookie(true);
+                  CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);
+
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message msg) {
+                          return false; // blokir pop-up iklan
+                      }
+                  });
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                          if (mode == Mode.IDLE) return false;
+                          return !isAllowed(req.getUrl().toString()); // blokir redirect iklan saat bekerja
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          if (mode == Mode.SCAN) onScanPageLoaded();
+                      }
+
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                          noteResource(req.getUrl().toString());
+                          return null;
+                      }
+
+                      @Override
+                      public void onLoadResource(WebView view, String url) {
+                          noteResource(url);
+                      }
+                  });
+              }
+
+              void noteResource(String u) {
+                  if (mode == Mode.CAPTURE && u != null && u.startsWith("http")
+                          && MEDIA.matcher(u).find() && !SEGMENT.matcher(u).find()) {
+                      captured.add(u);
+                  }
+              }
+
+              // ---------------- PINDAI FOLDER ----------------
+
+              void startScan() {
+                  String url = urlInput.getText().toString().trim();
+                  Uri u = Uri.parse(url);
+                  if (u.getHost() == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
+                      log("Link tidak valid. Contoh: https://filecoster.com/...");
+                      return;
+                  }
+                  String p = patternInput.getText().toString().trim();
+                  try {
+                      linkPattern = Pattern.compile(p.isEmpty() ? DEFAULT_PATTERN : p, Pattern.CASE_INSENSITIVE);
+                  } catch (Exception e) {
+                      log("Pola tidak valid: " + e.getMessage());
+                      return;
+                  }
+                  baseDomain = baseDomain(u.getHost());
+                  folderPath = u.getPath() == null ? "" : u.getPath();
+                  allowedHosts.clear();
+                  pageQueue.clear();
+                  seenPages.clear();
+                  found.clear();
+                  allLinks.clear();
+                  videos.clear();
+                  dlBtn.setEnabled(false);
+                  scanBtn.setEnabled(false);
+                  logView.setText("");
+                  log("Membuka folder...");
+                  mode = Mode.SCAN;
+                  seenPages.add(url);
+                  web.loadUrl(url);
+              }
+
+              void onScanPageLoaded() {
+                  final int seq = ++scanSeq;
+                  h.postDelayed(() -> { if (seq == scanSeq) scrollStep(seq, 0, -1); }, 2500);
+              }
+
+              void scrollStep(final int seq, final int n, final long lastH) {
+                  web.evaluateJavascript(JS_SCROLL, v -> {
+                      if (seq != scanSeq) return;
+                      long height = -2;
+                      try { height = (long) Double.parseDouble(v); } catch (Exception ignored) { }
+                      final long hh = height;
+                      if (n < 25 && hh != lastH) {
+                          h.postDelayed(() -> { if (seq == scanSeq) scrollStep(seq, n + 1, hh); }, 800);
+                      } else {
+                          collectLinks(seq);
+                      }
+                  });
+              }
+
+              void collectLinks(final int seq) {
+                  final String current = web.getUrl() == null ? "" : web.getUrl();
+                  web.evaluateJavascript(JS_LINKS, v -> {
+                      if (seq != scanSeq) return;
+                      try {
+                          JSONArray arr = new JSONArray(v);
+                          for (int i = 0; i < arr.length(); i++) {
+                              JSONArray it = arr.getJSONArray(i);
+                              String href = it.getString(0);
+                              String text = it.optString(1, "");
+                              int hash = href.indexOf('#');
+                              if (hash >= 0) href = href.substring(0, hash);
+                              Uri u = Uri.parse(href);
+                              String host = u.getHost();
+                              String scheme = u.getScheme();
+                              if (host == null || scheme == null || !scheme.startsWith("http")) continue;
+                              if (!sameSite(host)) continue;
+                              if (stripSlash(href).equals(stripSlash(current))) continue;
+                              String path = u.getPath() == null ? "" : u.getPath();
+                              if (SKIP.matcher(path).find()) continue;
+                              if (!allLinks.containsKey(href)) allLinks.put(href, text);
+                              String q = u.getQuery() == null ? "" : u.getQuery();
+                              if (path.equals(folderPath) && q.matches("(?i).*(^|&)(page|p)=\\d+.*")) {
+                                  if (!seenPages.contains(href)) pageQueue.add(href);
+                              } else if (linkPattern.matcher(href).find() && !found.containsKey(href)) {
+                                  found.put(href, text);
+                              }
+                          }
+                      } catch (Exception e) {
+                          log("Gagal membaca halaman: " + e.getMessage());
+                      }
+                      nextScanPage();
+                  });
+              }
+
+              void nextScanPage() {
+                  while (!pageQueue.isEmpty() && seenPages.size() < 50) {
+                      String next = pageQueue.poll();
+                      if (seenPages.contains(next)) continue;
+                      seenPages.add(next);
+                      log("Membuka halaman berikutnya...");
+                      web.loadUrl(next);
+                      return;
+                  }
+                  finishScan();
+              }
+
+              void finishScan() {
+                  mode = Mode.IDLE;
+                  scanSeq++;
+                  scanBtn.setEnabled(true);
+                  if (found.isEmpty()) {
+                      log("Tidak ada link video yang cocok. Link yang ada di halaman:");
+                      int n = 0;
+                      for (Map.Entry<String, String> e : allLinks.entrySet()) {
+                          if (n++ >= 60) break;
+                          log("  " + e.getKey() + "  |  " + e.getValue());
+                      }
+                      log("\nIsi kolom 'Pola link video' dengan bagian khas dari link video (mis. /watch/), lalu pindai lagi.");
+                      return;
+                  }
+                  for (Map.Entry<String, String> e : found.entrySet()) {
+                      videos.add(new String[]{e.getKey(), e.getValue()});
+                  }
+                  log("Ditemukan " + videos.size() + " video:");
+                  for (int i = 0; i < videos.size(); i++) {
+                      String t = videos.get(i)[1];
+                      log(String.format("%3d. %s", i + 1, t.isEmpty() ? videos.get(i)[0] : t));
+                  }
+                  dlBtn.setEnabled(true);
+              }
+
+              // ---------------- TANGKAP & UNDUH ----------------
+
+              void startDownloadAll() {
+                  if (videos.isEmpty()) return;
+                  if (Build.VERSION.SDK_INT < 29 && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
+                      return;
+                  }
+                  scanBtn.setEnabled(false);
+                  dlBtn.setEnabled(false);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  mode = Mode.CAPTURE;
+                  idx = 0;
+                  ok = 0;
+                  fail = 0;
+                  nextVideo();
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+                  if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startDownloadAll();
+                  else log("Izin penyimpanan ditolak, tidak bisa mengunduh.");
+              }
+
+              void nextVideo() {
+                  if (idx >= videos.size()) {
+                      mode = Mode.IDLE;
+                      capSeq++;
+                      web.loadUrl("about:blank");
+                      getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                      scanBtn.setEnabled(true);
+                      dlBtn.setEnabled(true);
+                      log("\nSelesai mencari: " + ok + " masuk antrean unduhan, " + fail + " gagal.\n" +
+                          "Unduhan berjalan di latar belakang (lihat notifikasi). File ada di Download/Filecoster.");
+                      return;
+                  }
+                  String[] v = videos.get(idx);
+                  captured.clear();
+                  allowedHosts.clear();
+                  jumpedToIframe = false;
+                  pollCount = 0;
+                  deadline = System.currentTimeMillis() + CAPTURE_TIMEOUT_MS;
+                  final int seq = ++capSeq;
+                  log("\n[" + (idx + 1) + "/" + videos.size() + "] " + (v[1].isEmpty() ? v[0] : v[1]));
+                  web.loadUrl(v[0]);
+                  h.postDelayed(() -> poll(seq), 3000);
+              }
+
+              void poll(final int seq) {
+                  if (seq != capSeq) return;
+                  web.evaluateJavascript(JS_POLL, v -> {
+                      if (seq != capSeq) return;
+                      List<String> media = new ArrayList<>();
+                      List<String> iframes = new ArrayList<>();
+                      try {
+                          JSONObject o = new JSONObject(v);
+                          JSONArray m = o.optJSONArray("media");
+                          JSONArray f = o.optJSONArray("iframes");
+                          if (m != null) for (int i = 0; i < m.length(); i++) media.add(m.getString(i));
+                          if (f != null) for (int i = 0; i < f.length(); i++) iframes.add(f.getString(i));
+                      } catch (Exception ignored) { }
+                      synchronized (captured) { media.addAll(captured); }
+
+                      String direct = null, hls = null;
+                      for (String s : media) {
+                          if (s.toLowerCase().contains(".m3u8")) {
+                              if (hls == null || s.toLowerCase().contains("master")) hls = s;
+                          } else if (direct == null) {
+                              direct = s;
+                          }
+                      }
+                      pollCount++;
+                      if (direct != null) {
+                          enqueue(direct);
+                          return;
+                      }
+                      if (hls != null && pollCount >= 6) {
+                          log("   x video berformat stream (m3u8), belum didukung aplikasi ini:\n     " + hls);
+                          fail++;
+                          advance();
+                          return;
+                      }
+                      if (System.currentTimeMillis() > deadline) {
+                          log("   x sumber video tidak tertangkap");
+                          fail++;
+                          advance();
+                          return;
+                      }
+                      if (pollCount % 2 == 1 && pollCount <= 9) {
+                          web.evaluateJavascript(JS_PLAY, null);
+                      }
+                      if (!jumpedToIframe && pollCount >= 4 && !iframes.isEmpty()) {
+                          String target = pickIframe(iframes);
+                          if (target != null) {
+                              jumpedToIframe = true;
+                              String host = Uri.parse(target).getHost();
+                              if (host != null) allowedHosts.add(host);
+                              Map<String, String> hdr = new HashMap<>();
+                              String cur = web.getUrl();
+                              if (cur != null) hdr.put("Referer", cur);
+                              web.loadUrl(target, hdr);
+                          }
+                      }
+                      h.postDelayed(() -> poll(seq), 1500);
+                  });
+              }
+
+              String pickIframe(List<String> iframes) {
+                  for (String s : iframes) {
+                      String l = s.toLowerCase();
+                      if (l.contains("stream") || l.contains("embed") || l.contains("player")) return s;
+                  }
+                  for (String s : iframes) {
+                      String host = Uri.parse(s).getHost();
+                      if (host != null && sameSite(host)) return s;
+                  }
+                  return null;
+              }
+
+              void enqueue(String media) {
+                  String[] v = videos.get(idx);
+                  String referer = web.getUrl() == null ? v[0] : web.getUrl();
+                  String title = v[1].isEmpty() ? (web.getTitle() == null ? "video" : web.getTitle()) : v[1];
+                  String name = String.format("%03d - %s%s", idx + 1, sanitize(title), extOf(media));
+                  try {
+                      DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                      DownloadManager.Request r = new DownloadManager.Request(Uri.parse(media));
+                      r.addRequestHeader("User-Agent", web.getSettings().getUserAgentString());
+                      r.addRequestHeader("Referer", referer);
+                      String cookie = CookieManager.getInstance().getCookie(media);
+                      if (cookie != null) r.addRequestHeader("Cookie", cookie);
+                      r.setTitle(name);
+                      r.setDescription("Filecoster Downloader");
+                      r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                      r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Filecoster/" + name);
+                      dm.enqueue(r);
+                      log("   OK masuk antrean: " + name);
+                      ok++;
+                  } catch (Exception e) {
+                      log("   x gagal memulai unduhan: " + e.getMessage());
+                      fail++;
+                  }
+                  advance();
+              }
+
+              void advance() {
+                  idx++;
+                  capSeq++;
+                  h.postDelayed(this::nextVideo, 1500);
+              }
+
+              // ---------------- BANTUAN ----------------
+
+              boolean isAllowed(String url) {
+                  String host = Uri.parse(url).getHost();
+                  if (host == null) return true;
+                  return sameSite(host) || allowedHosts.contains(host);
+              }
+
+              boolean sameSite(String host) {
+                  return host.equals(baseDomain) || host.endsWith("." + baseDomain);
+              }
+
+              static String baseDomain(String host) {
+                  String[] p = host.split("\\.");
+                  if (p.length <= 2) return host;
+                  return p[p.length - 2] + "." + p[p.length - 1];
+              }
+
+              static String stripSlash(String s) {
+                  return s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
+              }
+
+              static String sanitize(String s) {
+                  String r = s.replaceAll("[\\\\/:*?\"<>|\\r\\n\\t]+", " ").replaceAll("\\s+", " ").trim();
+                  if (r.length() > 100) r = r.substring(0, 100).trim();
+                  return r.isEmpty() ? "video" : r;
+              }
+
+              static String extOf(String url) {
+                  String seg = Uri.parse(url).getLastPathSegment();
+                  if (seg != null) {
+                      int dot = seg.lastIndexOf('.');
+                      if (dot >= 0) {
+                          String ext = seg.substring(dot).toLowerCase();
+                          if (ext.matches("\\.(mp4|webm|mkv|mov|m4v)")) return ext;
+                      }
+                  }
+                  return ".mp4";
+              }
+
+              void log(String s) {
+                  logView.append(s + "\n");
+                  logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+              }
+
+              int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (mode == Mode.IDLE && web.canGoBack()) web.goBack();
+                  else super.onBackPressed();
+              }
+          }
+          EOF_FILE
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build APK
+        run: |
+          gradle assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk FilecosterDownloader.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FilecosterDownloader
+          path: FilecosterDownloader.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Filecoster Downloader (build ${{ github.run_number }})
+          files: FilecosterDownloader.apk
