@@ -62,8 +62,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 7
-                  versionName '2.0'
+                  versionCode 8
+                  versionName '2.1'
               }
 
               compileOptions {
@@ -84,6 +84,11 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
               <uses-permission
                   android:name="android.permission.WRITE_EXTERNAL_STORAGE"
                   android:maxSdkVersion="28" />
@@ -96,12 +101,17 @@ jobs:
                       android:name=".MainActivity"
                       android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
                       android:exported="true"
+                      android:launchMode="singleTop"
                       android:windowSoftInputMode="adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <service
+                      android:name=".KeepAliveService"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync" />
               </application>
           </manifest>
           EOF_FILE
@@ -492,6 +502,137 @@ jobs:
           EOF_FILE
 
           mkdir -p app/src/main/java/com/example/fcdownloader
+          cat > app/src/main/java/com/example/fcdownloader/KeepAliveService.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.net.wifi.WifiManager;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.PowerManager;
+
+          /**
+           * Layanan latar depan: menjaga CPU dan Wi-Fi tetap aktif walau layar mati,
+           * dan menampilkan kemajuan di notifikasi. Dipakai selama memindai/mencari video.
+           */
+          public class KeepAliveService extends Service {
+              static final String CHANNEL = "fc_run";
+              static final String ACTION_STOP = "com.example.fcdownloader.STOP";
+              static final int NOTIF_ID = 11;
+              static final long MAX_HOLD_MS = 6L * 60 * 60 * 1000;
+
+              /** Dipasang oleh MainActivity: dijalankan saat tombol Hentikan di notifikasi ditekan. */
+              static volatile Runnable stopHook;
+              static volatile boolean running;
+
+              private PowerManager.WakeLock wake;
+              private WifiManager.WifiLock wifi;
+
+              static void update(Context c, String text, int pct) {
+                  Intent i = new Intent(c, KeepAliveService.class);
+                  i.putExtra("text", text);
+                  i.putExtra("pct", pct);
+                  if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i);
+                  else c.startService(i);
+              }
+
+              static void halt(Context c) {
+                  c.stopService(new Intent(c, KeepAliveService.class));
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              @SuppressWarnings("deprecation")
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+                      final Runnable hook = stopHook;
+                      if (hook != null) new Handler(Looper.getMainLooper()).post(hook);
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  String text = intent == null ? "Berjalan" : intent.getStringExtra("text");
+                  int pct = intent == null ? -1 : intent.getIntExtra("pct", -1);
+
+                  Notification n = build(text == null ? "Berjalan" : text, pct);
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                  } else {
+                      startForeground(NOTIF_ID, n);
+                  }
+                  if (!running) {
+                      running = true;
+                      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                      wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "fcdownloader:run");
+                      wake.setReferenceCounted(false);
+                      wake.acquire(MAX_HOLD_MS);
+                      WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                      if (wm != null) {
+                          wifi = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "fcdownloader:wifi");
+                          wifi.setReferenceCounted(false);
+                          wifi.acquire();
+                      }
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              @SuppressWarnings("deprecation")
+              private Notification build(String text, int pct) {
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  Notification.Builder b;
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      if (nm.getNotificationChannel(CHANNEL) == null) {
+                          NotificationChannel ch = new NotificationChannel(CHANNEL, "Proses unduhan",
+                                  NotificationManager.IMPORTANCE_LOW);
+                          ch.setDescription("Menjaga pemindaian dan pencarian video tetap berjalan saat layar mati");
+                          nm.createNotificationChannel(ch);
+                      }
+                      b = new Notification.Builder(this, CHANNEL);
+                  } else {
+                      b = new Notification.Builder(this);
+                  }
+                  int flags = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+                  Intent open = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP
+                          | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                  Intent stop = new Intent(this, KeepAliveService.class).setAction(ACTION_STOP);
+                  PendingIntent openPi = PendingIntent.getActivity(this, 0, open, flags);
+                  PendingIntent stopPi = PendingIntent.getService(this, 1, stop, flags);
+                  b.setSmallIcon(android.R.drawable.stat_sys_download)
+                          .setContentTitle("Filecoster Downloader")
+                          .setContentText(text)
+                          .setOngoing(true)
+                          .setOnlyAlertOnce(true)
+                          .setContentIntent(openPi)
+                          .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel,
+                                  "Hentikan", stopPi).build());
+                  if (pct >= 0) b.setProgress(100, Math.min(100, pct), false);
+                  else b.setProgress(0, 0, true);
+                  return b.build();
+              }
+
+              @Override
+              public void onDestroy() {
+                  running = false;
+                  if (wake != null && wake.isHeld()) wake.release();
+                  if (wifi != null && wifi.isHeld()) wifi.release();
+                  super.onDestroy();
+              }
+          }
+          EOF_FILE
+
+          mkdir -p app/src/main/java/com/example/fcdownloader
           cat > app/src/main/java/com/example/fcdownloader/MainActivity.java << 'EOF_FILE'
           package com.example.fcdownloader;
 
@@ -507,7 +648,10 @@ jobs:
           import android.graphics.Typeface;
           import android.graphics.drawable.ColorDrawable;
           import android.database.Cursor;
+          import android.content.Intent;
           import android.net.Uri;
+          import android.os.PowerManager;
+          import android.provider.Settings;
           import android.os.Build;
           import android.os.Bundle;
           import android.os.Environment;
@@ -659,6 +803,10 @@ jobs:
               final List<TextView> rowChips = new ArrayList<>(), rowNotes = new ArrayList<>();
               final Map<Long, Integer> dlMap = new HashMap<>();
               boolean tracking;
+              CheckBox keepBox;
+              TextView batteryStatus, batteryBtn;
+              String lastNotif = "";
+              boolean loadingPrefs = true;
               TextView darkOverlay;
               boolean paused;
               int stepSeq, retries, retryIdx = -1;
@@ -702,6 +850,15 @@ jobs:
                   super.onCreate(b);
                   buildUi();
                   setupWebView();
+                  KeepAliveService.stopHook = () -> {
+                      if (mode == Mode.SCAN) stopScan();
+                      else if (mode == Mode.CAPTURE) stopCapture();
+                  };
+                  if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 2);
+                  }
+                  loadingPrefs = false;
                   setStatus("Siap. Tempel link folder untuk mulai.", Ui.MUTED);
                   buildRows();
                   showTab(0);
@@ -791,7 +948,22 @@ jobs:
                   settingsBody = Ui.col(this);
                   settingsBody.setVisibility(View.GONE);
 
-                  settingsBody.addView(section("Pemindaian"), Ui.fill(this, 18));
+                  settingsBody.addView(section("Layar mati"), Ui.fill(this, 18));
+                  keepBox = Ui.check(this, "Tetap berjalan saat layar dimatikan", prefs.getBoolean("keep", true));
+                  settingsBody.addView(keepBox, Ui.fill(this, 4));
+                  TextView keepHint = Ui.hint(this, "Aplikasi menahan CPU dan Wi-Fi tetap aktif lewat notifikasi, "
+                          + "jadi kamu boleh menekan tombol power.");
+                  keepHint.setPadding(dp(32), 0, 0, 0);
+                  settingsBody.addView(keepHint);
+                  LinearLayout brow = Ui.row(this);
+                  batteryStatus = Ui.hint(this, "");
+                  brow.addView(batteryStatus, Ui.weight(1));
+                  batteryBtn = Ui.ghost(this, "Izinkan");
+                  batteryBtn.setTextSize(13);
+                  brow.addView(batteryBtn);
+                  settingsBody.addView(brow, Ui.fill(this, 10));
+
+                  settingsBody.addView(section("Pemindaian"), Ui.fill(this, 22));
                   subBox = Ui.check(this, "Ikut pindai subfolder (folder di dalam folder)", prefs.getBoolean("sub", true));
                   settingsBody.addView(subBox, Ui.fill(this, 4));
                   adBox = Ui.check(this, "Blokir iklan", prefs.getBoolean("ads", true));
@@ -825,8 +997,10 @@ jobs:
                   settingsBody.addView(Ui.hint(this, "Isi hanya jika video atau subfolder tidak terdeteksi. "
                           + "Masukkan bagian khas dari link-nya, misalnya /watch/ atau /folder/."), Ui.fill(this, 4));
                   patternInput = Ui.input(this, "Pola link video");
+                  patternInput.setText(prefs.getString("pat", ""));
                   settingsBody.addView(patternInput, Ui.fill(this, 10));
                   folderPatternInput = Ui.input(this, "Pola link folder");
+                  folderPatternInput.setText(prefs.getString("fpat", ""));
                   settingsBody.addView(folderPatternInput, Ui.fill(this, 8));
                   set.addView(settingsBody);
                   root.addView(set, Ui.fill(this, 12));
@@ -925,15 +1099,33 @@ jobs:
                   });
                   tabVideos.setOnClickListener(v -> showTab(0));
                   tabLog.setOnClickListener(v -> showTab(1));
-                  subBox.setOnCheckedChangeListener((bt, on) -> updateSettingsSummary());
+                  subBox.setOnCheckedChangeListener((bt, on) -> {
+                      updateSettingsSummary();
+                      saveSettings();
+                  });
                   adBox.setOnCheckedChangeListener((bt, on) -> {
                       adBlock = on;
                       updateSettingsSummary();
+                      saveSettings();
                   });
+                  keepBox.setOnCheckedChangeListener((bt, on) -> {
+                      saveSettings();
+                      refreshUi();
+                  });
+                  batteryBtn.setOnClickListener(v -> askIgnoreBattery());
+                  TextWatcher saver = new TextWatcher() {
+                      public void beforeTextChanged(CharSequence c, int a, int b, int d) { }
+                      public void onTextChanged(CharSequence c, int a, int b, int d) { }
+                      public void afterTextChanged(Editable e) { saveSettings(); }
+                  };
+                  patternInput.addTextChangedListener(saver);
+                  folderPatternInput.addTextChangedListener(saver);
+                  urlInput.addTextChangedListener(saver);
                   android.widget.AdapterView.OnItemSelectedListener sel = new android.widget.AdapterView.OnItemSelectedListener() {
                       @Override
                       public void onItemSelected(android.widget.AdapterView<?> parent, View view, int pos, long id) {
                           updateSettingsSummary();
+                          saveSettings();
                       }
 
                       @Override
@@ -944,8 +1136,12 @@ jobs:
                   folderInput.addTextChangedListener(new TextWatcher() {
                       public void beforeTextChanged(CharSequence c, int a, int b, int d) { }
                       public void onTextChanged(CharSequence c, int a, int b, int d) { }
-                      public void afterTextChanged(Editable e) { updateSettingsSummary(); }
+                      public void afterTextChanged(Editable e) {
+                          updateSettingsSummary();
+                          saveSettings();
+                      }
                   });
+                  updateBatteryStatus();
                   updateSettingsSummary();
               }
 
@@ -1001,6 +1197,77 @@ jobs:
                   destPreview.setText("Contoh hasil: " + example + (sub.isEmpty() ? "" : "/" + sub) + "/001 - Judul video.mp4");
                   settingsSummary.setText((subBox.isChecked() ? "Termasuk subfolder" : "Hanya folder ini")
                           + ", simpan ke " + where + (adBox.isChecked() ? ", iklan diblokir." : "."));
+              }
+
+              /** Semua pengaturan disimpan di penyimpanan aplikasi (bukan cache), langsung saat diubah. */
+              void saveSettings() {
+                  if (loadingPrefs || prefs == null) return;
+                  prefs.edit()
+                          .putString("url", urlInput.getText().toString().trim())
+                          .putString("pat", patternInput.getText().toString())
+                          .putString("fpat", folderPatternInput.getText().toString())
+                          .putInt("base", baseSpin.getSelectedItemPosition())
+                          .putInt("save", saveSpin.getSelectedItemPosition())
+                          .putString("folder", folderInput.getText().toString())
+                          .putBoolean("sub", subBox.isChecked())
+                          .putBoolean("ads", adBox.isChecked())
+                          .putBoolean("keep", keepBox.isChecked())
+                          .apply();
+              }
+
+              boolean batteryUnrestricted() {
+                  if (Build.VERSION.SDK_INT < 23) return true;
+                  PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                  return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+              }
+
+              void updateBatteryStatus() {
+                  boolean ok = batteryUnrestricted();
+                  batteryStatus.setText(ok ? "Hemat baterai tidak membatasi aplikasi ini."
+                          : "Disarankan: izinkan aplikasi berjalan tanpa pembatasan baterai.");
+                  batteryStatus.setTextColor(ok ? Ui.ION : Ui.AMBER);
+                  batteryBtn.setVisibility(ok ? View.GONE : View.VISIBLE);
+              }
+
+              void askIgnoreBattery() {
+                  try {
+                      startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                              Uri.parse("package:" + getPackageName())));
+                  } catch (Exception e) {
+                      try {
+                          startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                      } catch (Exception ignored) {
+                          setStatus("Buka Pengaturan HP, cari Baterai, lalu izinkan aplikasi ini tanpa batasan.", Ui.AMBER);
+                      }
+                  }
+              }
+
+              /** Menyalakan/mematikan layanan latar depan sesuai keadaan, dan memperbarui notifikasi. */
+              void syncService() {
+                  boolean want = mode != Mode.IDLE && keepBox != null && keepBox.isChecked();
+                  if (!want) {
+                      if (KeepAliveService.running) KeepAliveService.halt(this);
+                      lastNotif = "";
+                      return;
+                  }
+                  int total = videos.size();
+                  int done = countState(ST_DONE);
+                  int active = countState(ST_SEARCH) + countState(ST_QUEUED) + countState(ST_DL);
+                  String text;
+                  int pct;
+                  if (mode == Mode.SCAN) {
+                      text = "Memindai folder: " + found.size() + " video ditemukan";
+                      pct = -1;
+                  } else {
+                      int cur = Math.min(idx + 1, Math.max(total, 1));
+                      text = "Mencari video " + cur + " dari " + total + ", " + done + " selesai";
+                      pct = total == 0 ? -1 : (done + active) * 100 / total;
+                  }
+                  String key = text + "|" + pct;
+                  if (!key.equals(lastNotif) || !KeepAliveService.running) {
+                      lastNotif = key;
+                      KeepAliveService.update(this, text, pct);
+                  }
               }
 
               void pasteLink() {
@@ -1095,6 +1362,7 @@ jobs:
                   previewToggle.setText(busy ? "Aktif" : (previewOpen ? "Sembunyikan" : "Tampilkan"));
                   previewToggle.setAlpha(busy ? 0.5f : 1f);
                   tabVideos.setText(total > 0 ? "Daftar video (" + total + ")" : "Daftar video");
+                  syncService();
               }
 
               void buildRows() {
@@ -1547,6 +1815,7 @@ jobs:
 
               @Override
               public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+                  if (code != 1) return;
                   if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startDownloadAll();
                   else log("Izin penyimpanan ditolak, tidak bisa mengunduh.");
               }
@@ -1867,6 +2136,14 @@ jobs:
               @Override
               protected void onStop() {
                   super.onStop();
+                  boolean keep = mode != Mode.IDLE && keepBox.isChecked() && KeepAliveService.running;
+                  if (keep) {
+                      // layar mati / aplikasi ditinggal: proses diteruskan, layanan latar depan menjaga CPU & Wi-Fi
+                      web.onResume();
+                      web.resumeTimers();
+                      if (mode == Mode.CAPTURE) log("\n[layar mati] proses tetap berjalan di latar belakang.");
+                      return;
+                  }
                   h.removeCallbacks(tracker);
                   tracking = false;
                   if (mode == Mode.CAPTURE && !paused) {
@@ -1879,8 +2156,16 @@ jobs:
               }
 
               @Override
+              protected void onDestroy() {
+                  KeepAliveService.stopHook = null;
+                  KeepAliveService.halt(this);
+                  super.onDestroy();
+              }
+
+              @Override
               protected void onStart() {
                   super.onStart();
+                  updateBatteryStatus();
                   if (!dlMap.isEmpty()) startTracker();
                   if (mode == Mode.CAPTURE && paused) {
                       paused = false;
