@@ -62,8 +62,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 5
-                  versionName '1.4'
+                  versionCode 7
+                  versionName '2.0'
               }
 
               compileOptions {
@@ -90,7 +90,7 @@ jobs:
 
               <application
                   android:label="Filecoster Downloader"
-                  android:theme="@android:style/Theme.DeviceDefault.Light"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
                   android:usesCleartextTraffic="true">
                   <activity
                       android:name=".MainActivity"
@@ -107,16 +107,406 @@ jobs:
           EOF_FILE
 
           mkdir -p app/src/main/java/com/example/fcdownloader
+          cat > app/src/main/java/com/example/fcdownloader/Ui.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.content.Context;
+          import android.content.res.ColorStateList;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.text.TextUtils;
+          import android.util.TypedValue;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.ArrayAdapter;
+          import android.widget.CheckBox;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.Spinner;
+          import android.widget.TextView;
+
+          /** Palet & komponen tampilan "panel kendali" bertema samudra malam. */
+          final class Ui {
+              // palet
+              static final int ABYSS = Color.parseColor("#0A1024");   // latar
+              static final int PANEL = Color.parseColor("#121A35");   // kartu
+              static final int PANEL_HI = Color.parseColor("#18224A");
+              static final int LINE = Color.parseColor("#26325E");    // garis/track
+              static final int ION = Color.parseColor("#4FE3D4");     // aksi utama, selesai
+              static final int ION_DEEP = Color.parseColor("#0E3B46");
+              static final int AMBER = Color.parseColor("#FFC857");   // sedang berjalan
+              static final int PULSE = Color.parseColor("#FF5C8A");   // gagal / berhenti
+              static final int TEXT = Color.parseColor("#E6ECFF");
+              static final int MUTED = Color.parseColor("#8A95BE");
+
+              static final Typeface DISPLAY = Typeface.create("sans-serif-condensed", Typeface.BOLD);
+              static final Typeface MEDIUM = Typeface.create("sans-serif-medium", Typeface.NORMAL);
+              static final Typeface BODY = Typeface.create("sans-serif", Typeface.NORMAL);
+
+              private Ui() { }
+
+              static int dp(Context c, float v) {
+                  return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, c.getResources().getDisplayMetrics()));
+              }
+
+              static GradientDrawable box(Context c, int fill, float radiusDp, int stroke) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(fill);
+                  g.setCornerRadius(dp(c, radiusDp));
+                  if (stroke != 0) g.setStroke(dp(c, 1), stroke);
+                  return g;
+              }
+
+              static LinearLayout.LayoutParams lp(int w, int h) {
+                  return new LinearLayout.LayoutParams(w, h);
+              }
+
+              static LinearLayout.LayoutParams weight(float w) {
+                  return new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w);
+              }
+
+              static LinearLayout.LayoutParams fill(Context c, int topDp) {
+                  LinearLayout.LayoutParams p = lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  p.topMargin = dp(c, topDp);
+                  return p;
+              }
+
+              static LinearLayout col(Context c) {
+                  LinearLayout l = new LinearLayout(c);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  return l;
+              }
+
+              static LinearLayout row(Context c) {
+                  LinearLayout l = new LinearLayout(c);
+                  l.setOrientation(LinearLayout.HORIZONTAL);
+                  l.setGravity(Gravity.CENTER_VERTICAL);
+                  return l;
+              }
+
+              /** Kartu panel dengan sudut agak tegas; kartu utama memakai garis tepi. */
+              static LinearLayout card(Context c, boolean outlined) {
+                  LinearLayout l = col(c);
+                  l.setBackground(box(c, PANEL, 14, outlined ? LINE : 0));
+                  int p = dp(c, 16);
+                  l.setPadding(p, p, p, p);
+                  return l;
+              }
+
+              static TextView text(Context c, String s, float sp, int color, Typeface tf) {
+                  TextView t = new TextView(c);
+                  t.setText(s);
+                  t.setTextSize(sp);
+                  t.setTextColor(color);
+                  t.setTypeface(tf);
+                  return t;
+              }
+
+              static TextView title(Context c, String s) {
+                  TextView t = text(c, s, 17, TEXT, DISPLAY);
+                  t.setLetterSpacing(0.02f);
+                  return t;
+              }
+
+              static TextView hint(Context c, String s) {
+                  TextView t = text(c, s, 12.5f, MUTED, BODY);
+                  t.setLineSpacing(0, 1.15f);
+                  return t;
+              }
+
+              static EditText input(Context c, String hintText) {
+                  EditText e = new EditText(c);
+                  e.setHint(hintText);
+                  e.setSingleLine(true);
+                  e.setTextSize(15);
+                  e.setTextColor(TEXT);
+                  e.setHintTextColor(Color.parseColor("#5B6690"));
+                  e.setTypeface(BODY);
+                  e.setBackground(box(c, ABYSS, 10, LINE));
+                  int h = dp(c, 12);
+                  e.setPadding(h, dp(c, 11), h, dp(c, 11));
+                  return e;
+              }
+
+              /** Tombol utama: blok ion terang dengan teks gelap. */
+              static TextView primary(Context c, String s) {
+                  TextView b = text(c, s, 16, ABYSS, DISPLAY);
+                  b.setLetterSpacing(0.03f);
+                  b.setGravity(Gravity.CENTER);
+                  b.setMinHeight(dp(c, 54));
+                  b.setBackground(box(c, ION, 12, 0));
+                  b.setClickable(true);
+                  b.setFocusable(true);
+                  return b;
+              }
+
+              static void stylePrimary(Context c, TextView b, int fill, int textColor) {
+                  b.setBackground(box(c, fill, 12, 0));
+                  b.setTextColor(textColor);
+              }
+
+              /** Tombol sekunder bergaris. */
+              static TextView ghost(Context c, String s) {
+                  TextView b = text(c, s, 14, ION, MEDIUM);
+                  b.setGravity(Gravity.CENTER);
+                  int h = dp(c, 14);
+                  b.setPadding(h, dp(c, 10), h, dp(c, 10));
+                  b.setBackground(box(c, Color.TRANSPARENT, 10, LINE));
+                  b.setClickable(true);
+                  b.setFocusable(true);
+                  return b;
+              }
+
+              static TextView chip(Context c) {
+                  TextView t = text(c, "", 11.5f, MUTED, MEDIUM);
+                  int h = dp(c, 9);
+                  t.setPadding(h, dp(c, 3), h, dp(c, 4));
+                  t.setSingleLine(true);
+                  return t;
+              }
+
+              static void setChip(Context c, TextView t, String s, int color) {
+                  t.setText(s);
+                  t.setTextColor(color);
+                  t.setBackground(box(c, (color & 0x00FFFFFF) | 0x22000000, 20, (color & 0x00FFFFFF) | 0x66000000));
+              }
+
+              static CheckBox check(Context c, String s, boolean on) {
+                  CheckBox b = new CheckBox(c);
+                  b.setText(s);
+                  b.setTextColor(TEXT);
+                  b.setTextSize(14);
+                  b.setTypeface(BODY);
+                  b.setChecked(on);
+                  b.setButtonTintList(ColorStateList.valueOf(ION));
+                  return b;
+              }
+
+              static Spinner spinner(Context c, String[] items) {
+                  Spinner s = new Spinner(c, Spinner.MODE_DROPDOWN);
+                  s.setAdapter(new ArrayAdapter<String>(c, android.R.layout.simple_list_item_1, items) {
+                      @Override
+                      public View getView(int pos, View v, ViewGroup parent) {
+                          TextView t = (TextView) super.getView(pos, v, parent);
+                          t.setTextColor(TEXT);
+                          t.setTextSize(14);
+                          t.setTypeface(BODY);
+                          t.setSingleLine(true);
+                          t.setEllipsize(TextUtils.TruncateAt.END);
+                          t.setPadding(dp(c, 12), dp(c, 10), dp(c, 28), dp(c, 10));
+                          return t;
+                      }
+
+                      @Override
+                      public View getDropDownView(int pos, View v, ViewGroup parent) {
+                          TextView t = (TextView) super.getDropDownView(pos, v, parent);
+                          t.setTextColor(TEXT);
+                          t.setTextSize(14);
+                          t.setTypeface(BODY);
+                          t.setSingleLine(false);
+                          t.setPadding(dp(c, 14), dp(c, 12), dp(c, 14), dp(c, 12));
+                          return t;
+                      }
+                  });
+                  s.setBackground(box(c, ABYSS, 10, LINE));
+                  s.setPopupBackgroundDrawable(box(c, PANEL_HI, 10, LINE));
+                  return s;
+              }
+          }
+          EOF_FILE
+
+          mkdir -p app/src/main/java/com/example/fcdownloader
+          cat > app/src/main/java/com/example/fcdownloader/RingView.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.animation.ValueAnimator;
+          import android.content.Context;
+          import android.graphics.BlurMaskFilter;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.graphics.RectF;
+          import android.view.View;
+          import android.view.animation.LinearInterpolator;
+
+          /**
+           * Cincin pemindai: berputar saat memindai, lalu menjadi pengukur kemajuan
+           * (ion = selesai, amber = sedang diunduh, merah = gagal).
+           */
+          public class RingView extends View {
+              private float done, active, failed;
+              private boolean spinning;
+              private float sweep;
+              private String big = "0", small = "";
+              private ValueAnimator anim;
+
+              private final Paint track = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint arc = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint tBig = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint tSmall = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final RectF rect = new RectF();
+
+              public RingView(Context c) {
+                  super(c);
+                  setLayerType(LAYER_TYPE_SOFTWARE, null); // perlu untuk efek pendar
+                  track.setStyle(Paint.Style.STROKE);
+                  track.setColor(Ui.LINE);
+                  arc.setStyle(Paint.Style.STROKE);
+                  arc.setStrokeCap(Paint.Cap.ROUND);
+                  glow.setStyle(Paint.Style.STROKE);
+                  glow.setStrokeCap(Paint.Cap.ROUND);
+                  tick.setStrokeCap(Paint.Cap.ROUND);
+                  tBig.setTypeface(Ui.DISPLAY);
+                  tBig.setColor(Ui.TEXT);
+                  tBig.setTextAlign(Paint.Align.CENTER);
+                  tSmall.setTypeface(Ui.BODY);
+                  tSmall.setColor(Ui.MUTED);
+                  tSmall.setTextAlign(Paint.Align.CENTER);
+              }
+
+              public void setProgress(float done, float active, float failed) {
+                  this.done = clamp(done);
+                  this.active = clamp(active);
+                  this.failed = clamp(failed);
+                  invalidate();
+              }
+
+              public void setCenter(String big, String small) {
+                  this.big = big;
+                  this.small = small;
+                  invalidate();
+              }
+
+              public void setSpinning(boolean on) {
+                  if (on == spinning) return;
+                  spinning = on;
+                  if (on) {
+                      anim = ValueAnimator.ofFloat(0, 360);
+                      anim.setDuration(1800);
+                      anim.setRepeatCount(ValueAnimator.INFINITE);
+                      anim.setInterpolator(new LinearInterpolator());
+                      anim.addUpdateListener(a -> {
+                          sweep = (float) a.getAnimatedValue();
+                          invalidate();
+                      });
+                      anim.start();
+                  } else if (anim != null) {
+                      anim.cancel();
+                      anim = null;
+                  }
+                  invalidate();
+              }
+
+              private static float clamp(float v) {
+                  return Math.max(0, Math.min(1, v));
+              }
+
+              @Override
+              protected void onDetachedFromWindow() {
+                  super.onDetachedFromWindow();
+                  if (anim != null) anim.cancel();
+              }
+
+              @Override
+              protected void onMeasure(int w, int h) {
+                  int size = MeasureSpec.getSize(w);
+                  int max = Ui.dp(getContext(), 210);
+                  int s = Math.min(size, max);
+                  setMeasuredDimension(s, s);
+              }
+
+              @Override
+              protected void onDraw(Canvas c) {
+                  float size = Math.min(getWidth(), getHeight());
+                  float cx = getWidth() / 2f, cy = getHeight() / 2f;
+                  float stroke = size * 0.055f;
+                  float r = size / 2f - stroke * 2.2f;
+                  rect.set(cx - r, cy - r, cx + r, cy + r);
+
+                  // skala tik di sisi luar, seperti cakram instrumen
+                  float tickIn = r + stroke * 1.0f, tickOut = r + stroke * 1.6f, tickLong = r + stroke * 2.0f;
+                  for (int i = 0; i < 60; i++) {
+                      double a = Math.toRadians(i * 6 - 90);
+                      boolean major = i % 5 == 0;
+                      tick.setStrokeWidth(major ? stroke * 0.18f : stroke * 0.10f);
+                      tick.setColor(major ? Ui.MUTED : Ui.LINE);
+                      float o = major ? tickLong : tickOut;
+                      c.drawLine(cx + (float) Math.cos(a) * tickIn, cy + (float) Math.sin(a) * tickIn,
+                              cx + (float) Math.cos(a) * o, cy + (float) Math.sin(a) * o, tick);
+                  }
+
+                  track.setStrokeWidth(stroke);
+                  c.drawArc(rect, 0, 360, false, track);
+                  arc.setStrokeWidth(stroke);
+                  glow.setStrokeWidth(stroke * 1.6f);
+                  glow.setMaskFilter(new BlurMaskFilter(stroke * 1.2f, BlurMaskFilter.Blur.NORMAL));
+
+                  if (spinning) {
+                      // ekor sapuan radar yang memudar
+                      for (int k = 0; k < 6; k++) {
+                          int alpha = 255 - k * 42;
+                          arc.setColor(Ui.ION);
+                          arc.setAlpha(Math.max(20, alpha));
+                          c.drawArc(rect, sweep - 90 - k * 12, 12, false, arc);
+                      }
+                      glow.setColor(Ui.ION);
+                      glow.setAlpha(150);
+                      c.drawArc(rect, sweep - 92, 10, false, glow);
+                      arc.setAlpha(255);
+                  } else {
+                      float start = -90;
+                      start = seg(c, start, done, Ui.ION);
+                      start = seg(c, start, active, Ui.AMBER);
+                      seg(c, start, failed, Ui.PULSE);
+                  }
+
+                  tBig.setTextSize(size * 0.21f);
+                  tSmall.setTextSize(size * 0.065f);
+                  float bigY = cy + size * 0.045f;
+                  c.drawText(big, cx, bigY, tBig);
+                  if (small != null && !small.isEmpty()) {
+                      String[] lines = small.split("\n");
+                      float y = bigY + size * 0.10f;
+                      for (String line : lines) {
+                          c.drawText(line, cx, y, tSmall);
+                          y += size * 0.08f;
+                      }
+                  }
+              }
+
+              private float seg(Canvas c, float start, float frac, int color) {
+                  if (frac <= 0) return start;
+                  float sw = Math.max(2, frac * 360);
+                  glow.setColor(color);
+                  glow.setAlpha(110);
+                  c.drawArc(rect, start, sw, false, glow);
+                  arc.setColor(color);
+                  arc.setAlpha(255);
+                  c.drawArc(rect, start, sw, false, arc);
+                  return start + frac * 360;
+              }
+          }
+          EOF_FILE
+
+          mkdir -p app/src/main/java/com/example/fcdownloader
           cat > app/src/main/java/com/example/fcdownloader/MainActivity.java << 'EOF_FILE'
           package com.example.fcdownloader;
 
           import android.Manifest;
           import android.app.Activity;
           import android.app.DownloadManager;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
           import android.graphics.Color;
           import android.graphics.Typeface;
+          import android.graphics.drawable.ColorDrawable;
+          import android.database.Cursor;
           import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
@@ -125,10 +515,14 @@ jobs:
           import android.os.Looper;
           import android.os.Message;
           import android.os.SystemClock;
+          import android.text.Editable;
           import android.text.InputType;
+          import android.text.TextUtils;
+          import android.text.TextWatcher;
           import android.view.Gravity;
           import android.view.MotionEvent;
           import android.view.View;
+          import android.view.ViewGroup;
           import android.view.WindowManager;
           import android.webkit.CookieManager;
           import android.webkit.WebResourceError;
@@ -239,6 +633,10 @@ jobs:
                       "var c=find(document,0,0)||[window.innerWidth/2,window.innerHeight/2];" +
                       "return [c[0],c[1],window.innerWidth,window.innerHeight];})()";
 
+              static final String[] SAVE_MODES = {
+                      "Folder di dalam folder (ikuti struktur subfolder)",
+                      "Hanya satu folder (semua video jadi satu)",
+                      "Tanpa folder (langsung di folder utama)"};
               static final String[] BASE_NAMES = {"Download", "Movies", "DCIM"};
               static final String[] BASE_DIRS = {Environment.DIRECTORY_DOWNLOADS, Environment.DIRECTORY_MOVIES,
                       Environment.DIRECTORY_DCIM};
@@ -247,11 +645,25 @@ jobs:
 
               final Handler h = new Handler(Looper.getMainLooper());
               EditText urlInput, patternInput;
-              Button scanBtn, dlBtn, darkBtn;
+              TextView mainBtn, secBtn, darkBtn, pasteBtn, copyLogBtn, previewToggle;
+              TextView statusText, settingsSummary, settingsChevron, destPreview, tabVideos, tabLog, emptyList;
+              TextView statFolders, statVideos, statDone, statFail;
+              View statusDot;
+              LinearLayout settingsBody, listBox, logPane;
+              FrameLayout webFrame;
+              RingView ring;
+              boolean previewOpen;
+              static final int ST_WAIT = 0, ST_SEARCH = 1, ST_QUEUED = 2, ST_DL = 3, ST_DONE = 4, ST_FAIL = 5;
+              int[] vState = new int[0], vPct = new int[0];
+              String[] vNote = new String[0];
+              final List<TextView> rowChips = new ArrayList<>(), rowNotes = new ArrayList<>();
+              final Map<Long, Integer> dlMap = new HashMap<>();
+              boolean tracking;
               TextView darkOverlay;
               boolean paused;
               int stepSeq, retries, retryIdx = -1;
-              CheckBox adBox, treeBox;
+              CheckBox adBox, subBox;
+              Spinner saveSpin;
               EditText folderPatternInput;
               Spinner baseSpin;
               EditText folderInput;
@@ -259,7 +671,6 @@ jobs:
               volatile boolean adBlock = true;
               final ExecutorService bg = Executors.newSingleThreadExecutor();
               TextView logView;
-              ScrollView logScroll;
               WebView web;
 
               Mode mode = Mode.IDLE;
@@ -291,99 +702,199 @@ jobs:
                   super.onCreate(b);
                   buildUi();
                   setupWebView();
-                  log("1) Tempel link folder, tekan PINDAI.\n2) Periksa daftar video, lalu tekan UNDUH SEMUA.\n" +
-                      "Biarkan aplikasi tetap terbuka selama proses mencari video.");
+                  setStatus("Siap. Tempel link folder untuk mulai.", Ui.MUTED);
+                  buildRows();
+                  showTab(0);
+                  refreshUi();
               }
 
               void buildUi() {
-                  int pad = dp(10);
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(pad, pad, pad, pad);
-                  root.setFitsSystemWindows(true);
-
-                  urlInput = new EditText(this);
-                  urlInput.setHint("Link folder (https://...)");
-                  urlInput.setSingleLine(true);
-                  urlInput.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
-                  root.addView(urlInput);
-
-                  LinearLayout prow = new LinearLayout(this);
-                  prow.setOrientation(LinearLayout.HORIZONTAL);
-                  patternInput = new EditText(this);
-                  patternInput.setHint("Pola link video (ops.)");
-                  patternInput.setSingleLine(true);
-                  patternInput.setTextSize(13);
-                  folderPatternInput = new EditText(this);
-                  folderPatternInput.setHint("Pola link folder (ops.)");
-                  folderPatternInput.setSingleLine(true);
-                  folderPatternInput.setTextSize(13);
-                  prow.addView(patternInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-                  prow.addView(folderPatternInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-                  root.addView(prow);
-
-                  treeBox = new CheckBox(this);
-                  treeBox.setText("Simpan mengikuti struktur subfolder");
-                  treeBox.setChecked(true);
-                  root.addView(treeBox);
-
-                  adBox = new CheckBox(this);
-                  adBox.setText("Blokir iklan (matikan jika situs jadi error)");
-                  adBox.setChecked(true);
-                  adBox.setOnCheckedChangeListener((bt, on) -> adBlock = on);
-                  root.addView(adBox);
-
                   prefs = getSharedPreferences("fc", MODE_PRIVATE);
-                  LinearLayout frow = new LinearLayout(this);
-                  frow.setOrientation(LinearLayout.HORIZONTAL);
-                  frow.setGravity(Gravity.CENTER_VERTICAL);
-                  TextView flabel = new TextView(this);
-                  flabel.setText("Simpan ke:");
-                  frow.addView(flabel);
-                  baseSpin = new Spinner(this);
-                  baseSpin.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, BASE_NAMES));
+                  getWindow().setStatusBarColor(Ui.ABYSS);
+                  getWindow().setNavigationBarColor(Ui.ABYSS);
+                  getWindow().setBackgroundDrawable(new ColorDrawable(Ui.ABYSS));
+                  final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT, WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
+
+                  LinearLayout root = Ui.col(this);
+                  root.setPadding(dp(16), dp(14), dp(16), dp(32));
+
+                  // kepala
+                  LinearLayout head = Ui.row(this);
+                  LinearLayout titles = Ui.col(this);
+                  TextView appName = Ui.text(this, "Filecoster", 28, Ui.TEXT, Ui.DISPLAY);
+                  appName.setLetterSpacing(0.03f);
+                  titles.addView(appName);
+                  titles.addView(Ui.text(this, "Pengunduh folder video", 13, Ui.MUTED, Ui.BODY));
+                  head.addView(titles, Ui.weight(1));
+                  darkBtn = Ui.ghost(this, "Layar gelap");
+                  darkBtn.setTextSize(13);
+                  head.addView(darkBtn);
+                  root.addView(head);
+
+                  // baris status
+                  LinearLayout srow = Ui.row(this);
+                  statusDot = new View(this);
+                  srow.addView(statusDot, new LinearLayout.LayoutParams(dp(8), dp(8)));
+                  statusText = Ui.text(this, "", 14, Ui.TEXT, Ui.BODY);
+                  statusText.setPadding(dp(10), 0, 0, 0);
+                  srow.addView(statusText, Ui.weight(1));
+                  root.addView(srow, Ui.fill(this, 16));
+
+                  // cincin pemindai + angka
+                  LinearLayout dash = Ui.card(this, true);
+                  dash.setGravity(Gravity.CENTER_HORIZONTAL);
+                  ring = new RingView(this);
+                  LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  rp.gravity = Gravity.CENTER_HORIZONTAL;
+                  dash.addView(ring, rp);
+                  LinearLayout stats = Ui.row(this);
+                  statFolders = stat(stats, "folder");
+                  statVideos = stat(stats, "video");
+                  statDone = stat(stats, "selesai");
+                  statFail = stat(stats, "gagal");
+                  dash.addView(stats, Ui.fill(this, 12));
+                  root.addView(dash, Ui.fill(this, 12));
+
+                  // link + tombol utama
+                  LinearLayout linkCard = Ui.card(this, false);
+                  linkCard.addView(Ui.title(this, "Link folder"));
+                  linkCard.addView(Ui.hint(this, "Salin link folder dari browser, lalu tempel di sini."), Ui.fill(this, 2));
+                  LinearLayout lrow = Ui.row(this);
+                  urlInput = Ui.input(this, "https://filecoster.com/...");
+                  urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                  urlInput.setText(prefs.getString("url", ""));
+                  lrow.addView(urlInput, Ui.weight(1));
+                  pasteBtn = Ui.ghost(this, "Tempel");
+                  LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  pl.leftMargin = dp(8);
+                  lrow.addView(pasteBtn, pl);
+                  linkCard.addView(lrow, Ui.fill(this, 12));
+                  mainBtn = Ui.primary(this, "Pindai folder");
+                  linkCard.addView(mainBtn, Ui.fill(this, 14));
+                  secBtn = Ui.ghost(this, "Pindai ulang");
+                  linkCard.addView(secBtn, Ui.fill(this, 8));
+                  root.addView(linkCard, Ui.fill(this, 12));
+
+                  // pengaturan (bisa dilipat)
+                  LinearLayout set = Ui.card(this, false);
+                  LinearLayout shead = Ui.row(this);
+                  LinearLayout st = Ui.col(this);
+                  st.addView(Ui.title(this, "Pengaturan"));
+                  settingsSummary = Ui.hint(this, "");
+                  st.addView(settingsSummary, Ui.fill(this, 2));
+                  shead.addView(st, Ui.weight(1));
+                  settingsChevron = Ui.text(this, "\u25BE", 20, Ui.MUTED, Ui.BODY);
+                  settingsChevron.setPadding(dp(12), 0, dp(4), 0);
+                  shead.addView(settingsChevron);
+                  shead.setClickable(true);
+                  set.addView(shead);
+                  settingsBody = Ui.col(this);
+                  settingsBody.setVisibility(View.GONE);
+
+                  settingsBody.addView(section("Pemindaian"), Ui.fill(this, 18));
+                  subBox = Ui.check(this, "Ikut pindai subfolder (folder di dalam folder)", prefs.getBoolean("sub", true));
+                  settingsBody.addView(subBox, Ui.fill(this, 4));
+                  adBox = Ui.check(this, "Blokir iklan", prefs.getBoolean("ads", true));
+                  adBlock = adBox.isChecked();
+                  settingsBody.addView(adBox);
+                  TextView adHint = Ui.hint(this, "Matikan jika halaman Filecoster tidak mau terbuka.");
+                  adHint.setPadding(dp(32), 0, 0, 0);
+                  settingsBody.addView(adHint);
+
+                  settingsBody.addView(section("Penyimpanan"), Ui.fill(this, 20));
+                  settingsBody.addView(label("Lokasi"), Ui.fill(this, 8));
+                  LinearLayout frow = Ui.row(this);
+                  baseSpin = Ui.spinner(this, BASE_NAMES);
                   baseSpin.setSelection(Math.max(0, Math.min(BASE_NAMES.length - 1, prefs.getInt("base", 0))));
-                  frow.addView(baseSpin);
-                  TextView slash = new TextView(this);
-                  slash.setText(" / ");
+                  frow.addView(baseSpin, Ui.weight(1));
+                  TextView slash = Ui.text(this, "/", 18, Ui.MUTED, Ui.BODY);
+                  slash.setPadding(dp(10), 0, dp(10), 0);
                   frow.addView(slash);
-                  folderInput = new EditText(this);
-                  folderInput.setSingleLine(true);
-                  folderInput.setHint("nama folder");
+                  folderInput = Ui.input(this, "nama folder");
                   folderInput.setText(prefs.getString("folder", "Filecoster"));
-                  frow.addView(folderInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-                  root.addView(frow);
+                  frow.addView(folderInput, Ui.weight(1.4f));
+                  settingsBody.addView(frow, Ui.fill(this, 6));
+                  settingsBody.addView(label("Susunan folder"), Ui.fill(this, 14));
+                  saveSpin = Ui.spinner(this, SAVE_MODES);
+                  saveSpin.setSelection(Math.max(0, Math.min(SAVE_MODES.length - 1, prefs.getInt("save", 0))));
+                  settingsBody.addView(saveSpin, Ui.fill(this, 6));
+                  destPreview = Ui.hint(this, "");
+                  settingsBody.addView(destPreview, Ui.fill(this, 8));
 
-                  LinearLayout row = new LinearLayout(this);
-                  row.setOrientation(LinearLayout.HORIZONTAL);
-                  scanBtn = new Button(this);
-                  scanBtn.setText("Pindai");
-                  dlBtn = new Button(this);
-                  dlBtn.setText("Unduh semua");
-                  dlBtn.setEnabled(false);
-                  row.addView(scanBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-                  row.addView(dlBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-                  darkBtn = new Button(this);
-                  darkBtn.setText("Layar gelap");
-                  row.addView(darkBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-                  root.addView(row);
+                  settingsBody.addView(section("Lanjutan"), Ui.fill(this, 20));
+                  settingsBody.addView(Ui.hint(this, "Isi hanya jika video atau subfolder tidak terdeteksi. "
+                          + "Masukkan bagian khas dari link-nya, misalnya /watch/ atau /folder/."), Ui.fill(this, 4));
+                  patternInput = Ui.input(this, "Pola link video");
+                  settingsBody.addView(patternInput, Ui.fill(this, 10));
+                  folderPatternInput = Ui.input(this, "Pola link folder");
+                  settingsBody.addView(folderPatternInput, Ui.fill(this, 8));
+                  set.addView(settingsBody);
+                  root.addView(set, Ui.fill(this, 12));
 
+                  // pratinjau web
+                  LinearLayout prev = Ui.card(this, false);
+                  LinearLayout phead = Ui.row(this);
+                  LinearLayout pt = Ui.col(this);
+                  pt.addView(Ui.title(this, "Pratinjau langsung"));
+                  pt.addView(Ui.hint(this, "Tiap video dibuka dan diputar di sini. Jangan disentuh selama proses berjalan."),
+                          Ui.fill(this, 2));
+                  phead.addView(pt, Ui.weight(1));
+                  previewToggle = Ui.ghost(this, "Tampilkan");
+                  previewToggle.setTextSize(13);
+                  LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  tl.leftMargin = dp(10);
+                  phead.addView(previewToggle, tl);
+                  prev.addView(phead);
+                  webFrame = new FrameLayout(this);
+                  webFrame.setBackground(Ui.box(this, Color.BLACK, 10, Ui.LINE));
+                  webFrame.setPadding(dp(1), dp(1), dp(1), dp(1));
+                  webFrame.setClipToOutline(true);
                   web = new WebView(this);
-                  root.addView(web, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
+                  web.setBackgroundColor(Color.BLACK);
+                  webFrame.addView(web, new FrameLayout.LayoutParams(MATCH, MATCH));
+                  LinearLayout.LayoutParams wl = new LinearLayout.LayoutParams(MATCH, dp(240));
+                  wl.topMargin = dp(12);
+                  prev.addView(webFrame, wl);
+                  root.addView(prev, Ui.fill(this, 12));
 
-                  logScroll = new ScrollView(this);
-                  logView = new TextView(this);
-                  logView.setTypeface(Typeface.MONOSPACE);
-                  logView.setTextSize(12);
+                  // tab daftar video / catatan
+                  LinearLayout tabs = Ui.row(this);
+                  tabs.setBackground(Ui.box(this, Ui.PANEL, 12, 0));
+                  tabs.setPadding(dp(4), dp(4), dp(4), dp(4));
+                  tabVideos = tab("Daftar video");
+                  tabLog = tab("Catatan proses");
+                  tabs.addView(tabVideos, Ui.weight(1));
+                  tabs.addView(tabLog, Ui.weight(1));
+                  root.addView(tabs, Ui.fill(this, 20));
+
+                  listBox = Ui.col(this);
+                  emptyList = Ui.hint(this, "Belum ada video. Tempel link folder, lalu tekan Pindai folder.");
+                  emptyList.setPadding(dp(4), dp(8), dp(4), dp(8));
+                  root.addView(listBox, Ui.fill(this, 8));
+
+                  logPane = Ui.col(this);
+                  copyLogBtn = Ui.ghost(this, "Salin catatan");
+                  copyLogBtn.setTextSize(13);
+                  LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  cl.gravity = Gravity.END;
+                  logPane.addView(copyLogBtn, cl);
+                  logView = Ui.text(this, "", 12, Color.parseColor("#B7C1E6"), Typeface.MONOSPACE);
                   logView.setTextIsSelectable(true);
-                  logView.setPadding(0, dp(6), 0, 0);
-                  logScroll.addView(logView);
-                  root.addView(logScroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
+                  logView.setLineSpacing(0, 1.2f);
+                  logView.setBackground(Ui.box(this, Ui.PANEL, 12, 0));
+                  logView.setPadding(dp(12), dp(12), dp(12), dp(12));
+                  logView.setMinHeight(dp(120));
+                  logPane.addView(logView, Ui.fill(this, 8));
+                  root.addView(logPane, Ui.fill(this, 8));
+
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setFillViewport(true);
+                  scroll.addView(root);
 
                   // lapisan hitam: layar tampak mati tapi aplikasi tetap bekerja
                   darkOverlay = new TextView(this);
                   darkOverlay.setBackgroundColor(Color.BLACK);
-                  darkOverlay.setTextColor(Color.rgb(70, 70, 70));
+                  darkOverlay.setTextColor(Color.rgb(70, 78, 110));
                   darkOverlay.setGravity(Gravity.CENTER);
                   darkOverlay.setText("Aplikasi tetap bekerja.\nSentuh layar untuk kembali.");
                   darkOverlay.setVisibility(View.GONE);
@@ -391,13 +902,374 @@ jobs:
                   darkOverlay.setOnClickListener(v -> setDark(false));
 
                   FrameLayout frame = new FrameLayout(this);
-                  frame.addView(root);
-                  frame.addView(darkOverlay, new FrameLayout.LayoutParams(
-                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                  frame.setFitsSystemWindows(true);
+                  frame.addView(scroll);
+                  frame.addView(darkOverlay, new FrameLayout.LayoutParams(MATCH, MATCH));
                   setContentView(frame);
+
+                  // aksi
                   darkBtn.setOnClickListener(v -> setDark(true));
-                  scanBtn.setOnClickListener(v -> startScan());
-                  dlBtn.setOnClickListener(v -> startDownloadAll());
+                  mainBtn.setOnClickListener(v -> onMainAction());
+                  secBtn.setOnClickListener(v -> startScan());
+                  pasteBtn.setOnClickListener(v -> pasteLink());
+                  copyLogBtn.setOnClickListener(v -> copyLog());
+                  shead.setOnClickListener(v -> {
+                      boolean open = settingsBody.getVisibility() != View.VISIBLE;
+                      settingsBody.setVisibility(open ? View.VISIBLE : View.GONE);
+                      settingsChevron.setText(open ? "\u25B4" : "\u25BE");
+                  });
+                  previewToggle.setOnClickListener(v -> {
+                      if (mode != Mode.IDLE) return;
+                      previewOpen = !previewOpen;
+                      refreshUi();
+                  });
+                  tabVideos.setOnClickListener(v -> showTab(0));
+                  tabLog.setOnClickListener(v -> showTab(1));
+                  subBox.setOnCheckedChangeListener((bt, on) -> updateSettingsSummary());
+                  adBox.setOnCheckedChangeListener((bt, on) -> {
+                      adBlock = on;
+                      updateSettingsSummary();
+                  });
+                  android.widget.AdapterView.OnItemSelectedListener sel = new android.widget.AdapterView.OnItemSelectedListener() {
+                      @Override
+                      public void onItemSelected(android.widget.AdapterView<?> parent, View view, int pos, long id) {
+                          updateSettingsSummary();
+                      }
+
+                      @Override
+                      public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+                  };
+                  baseSpin.setOnItemSelectedListener(sel);
+                  saveSpin.setOnItemSelectedListener(sel);
+                  folderInput.addTextChangedListener(new TextWatcher() {
+                      public void beforeTextChanged(CharSequence c, int a, int b, int d) { }
+                      public void onTextChanged(CharSequence c, int a, int b, int d) { }
+                      public void afterTextChanged(Editable e) { updateSettingsSummary(); }
+                  });
+                  updateSettingsSummary();
+              }
+
+              // ---------------- TAMPILAN ----------------
+
+              TextView stat(LinearLayout parent, String label) {
+                  LinearLayout c = Ui.col(this);
+                  c.setGravity(Gravity.CENTER_HORIZONTAL);
+                  TextView n = Ui.text(this, "0", 22, Ui.TEXT, Ui.DISPLAY);
+                  c.addView(n);
+                  c.addView(Ui.text(this, label, 12, Ui.MUTED, Ui.BODY));
+                  parent.addView(c, Ui.weight(1));
+                  return n;
+              }
+
+              TextView section(String s) {
+                  return Ui.text(this, s, 14, Ui.ION, Ui.MEDIUM);
+              }
+
+              TextView label(String s) {
+                  return Ui.text(this, s, 12.5f, Ui.MUTED, Ui.MEDIUM);
+              }
+
+              TextView tab(String s) {
+                  TextView t = Ui.text(this, s, 14, Ui.MUTED, Ui.MEDIUM);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(0, dp(10), 0, dp(10));
+                  t.setClickable(true);
+                  return t;
+              }
+
+              void showTab(int which) {
+                  tabVideos.setBackground(which == 0 ? Ui.box(this, Ui.PANEL_HI, 9, Ui.LINE) : null);
+                  tabLog.setBackground(which == 1 ? Ui.box(this, Ui.PANEL_HI, 9, Ui.LINE) : null);
+                  tabVideos.setTextColor(which == 0 ? Ui.TEXT : Ui.MUTED);
+                  tabLog.setTextColor(which == 1 ? Ui.TEXT : Ui.MUTED);
+                  listBox.setVisibility(which == 0 ? View.VISIBLE : View.GONE);
+                  logPane.setVisibility(which == 1 ? View.VISIBLE : View.GONE);
+              }
+
+              void setStatus(String msg, int color) {
+                  statusText.setText(msg);
+                  statusDot.setBackground(Ui.box(this, color, 4, 0));
+              }
+
+              void updateSettingsSummary() {
+                  int m = saveSpin.getSelectedItemPosition();
+                  folderInput.setEnabled(m != 2);
+                  folderInput.setAlpha(m == 2 ? 0.4f : 1f);
+                  String where = destLabel();
+                  String example = BASE_NAMES[baseSpin.getSelectedItemPosition()];
+                  String sub = targetSub("Drama");
+                  destPreview.setText("Contoh hasil: " + example + (sub.isEmpty() ? "" : "/" + sub) + "/001 - Judul video.mp4");
+                  settingsSummary.setText((subBox.isChecked() ? "Termasuk subfolder" : "Hanya folder ini")
+                          + ", simpan ke " + where + (adBox.isChecked() ? ", iklan diblokir." : "."));
+              }
+
+              void pasteLink() {
+                  ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                  if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip().getItemCount() > 0) {
+                      CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+                      if (t != null) urlInput.setText(t.toString().trim());
+                  } else {
+                      setStatus("Papan klip kosong. Salin dulu link foldernya.", Ui.AMBER);
+                  }
+              }
+
+              void copyLog() {
+                  ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                  if (cm != null) {
+                      cm.setPrimaryClip(ClipData.newPlainText("catatan", logView.getText()));
+                      copyLogBtn.setText("Tersalin");
+                      h.postDelayed(() -> copyLogBtn.setText("Salin catatan"), 1500);
+                  }
+              }
+
+              void onMainAction() {
+                  if (mode == Mode.SCAN) stopScan();
+                  else if (mode == Mode.CAPTURE) stopCapture();
+                  else if (pendingCount() > 0) startDownloadAll();
+                  else startScan();
+              }
+
+              int countState(int st) {
+                  int n = 0;
+                  for (int v : vState) if (v == st) n++;
+                  return n;
+              }
+
+              int pendingCount() {
+                  return countState(ST_WAIT) + countState(ST_FAIL);
+              }
+
+              void refreshUi() {
+                  int total = videos.size();
+                  int done = countState(ST_DONE), failed = countState(ST_FAIL);
+                  int active = countState(ST_SEARCH) + countState(ST_QUEUED) + countState(ST_DL);
+                  int pending = pendingCount();
+
+                  statFolders.setText(String.valueOf(foldersScanned));
+                  statVideos.setText(String.valueOf(total > 0 ? total : found.size()));
+                  statDone.setText(String.valueOf(done));
+                  statFail.setText(String.valueOf(failed));
+                  statFail.setTextColor(failed > 0 ? Ui.PULSE : Ui.TEXT);
+                  statDone.setTextColor(done > 0 ? Ui.ION : Ui.TEXT);
+
+                  if (mode == Mode.SCAN) {
+                      ring.setSpinning(true);
+                      ring.setCenter(String.valueOf(found.size()), "video ditemukan");
+                  } else {
+                      ring.setSpinning(false);
+                      if (total == 0) {
+                          ring.setProgress(0, 0, 0);
+                          ring.setCenter("0", "belum ada video");
+                      } else {
+                          float t = total;
+                          float partial = 0;
+                          for (int i = 0; i < vState.length; i++) {
+                              if (vState[i] == ST_DL && vPct[i] > 0) partial += vPct[i] / 100f;
+                          }
+                          ring.setProgress((done + partial) / t, (active - partial) / t, failed / t);
+                          ring.setCenter(String.valueOf(done), "dari " + total + " selesai");
+                      }
+                  }
+
+                  if (mode == Mode.SCAN) {
+                      mainBtn.setText("Hentikan pemindaian");
+                      Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
+                  } else if (mode == Mode.CAPTURE) {
+                      mainBtn.setText("Hentikan");
+                      Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
+                  } else if (pending > 0) {
+                      boolean onlyFailed = countState(ST_WAIT) == 0;
+                      mainBtn.setText(onlyFailed ? "Coba lagi " + pending + " video gagal" : "Unduh " + pending + " video");
+                      Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
+                  } else {
+                      mainBtn.setText("Pindai folder");
+                      Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
+                  }
+                  secBtn.setVisibility(mode == Mode.IDLE && pending > 0 ? View.VISIBLE : View.GONE);
+
+                  boolean busy = mode != Mode.IDLE;
+                  urlInput.setEnabled(!busy);
+                  pasteBtn.setEnabled(!busy);
+                  pasteBtn.setAlpha(busy ? 0.4f : 1f);
+                  webFrame.setVisibility(busy || previewOpen ? View.VISIBLE : View.GONE);
+                  previewToggle.setText(busy ? "Aktif" : (previewOpen ? "Sembunyikan" : "Tampilkan"));
+                  previewToggle.setAlpha(busy ? 0.5f : 1f);
+                  tabVideos.setText(total > 0 ? "Daftar video (" + total + ")" : "Daftar video");
+              }
+
+              void buildRows() {
+                  listBox.removeAllViews();
+                  rowChips.clear();
+                  rowNotes.clear();
+                  if (videos.isEmpty()) {
+                      listBox.addView(emptyList);
+                      return;
+                  }
+                  String lastRel = null;
+                  for (int i = 0; i < videos.size(); i++) {
+                      String[] v = videos.get(i);
+                      if (!v[2].equals(lastRel)) {
+                          lastRel = v[2];
+                          TextView g = Ui.text(this, lastRel.isEmpty() ? "Folder utama" : lastRel, 13, Ui.ION, Ui.MEDIUM);
+                          g.setPadding(dp(4), 0, 0, 0);
+                          listBox.addView(g, Ui.fill(this, i == 0 ? 4 : 16));
+                      }
+                      LinearLayout r = Ui.row(this);
+                      r.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
+                      r.setPadding(dp(12), dp(11), dp(10), dp(11));
+                      r.addView(Ui.text(this, String.format("%03d", i + 1), 12, Ui.MUTED, Typeface.MONOSPACE));
+                      LinearLayout mid = Ui.col(this);
+                      mid.setPadding(dp(12), 0, dp(8), 0);
+                      String title = v[1].isEmpty() ? lastSegment(Uri.parse(v[0]).getPath() == null ? v[0] : Uri.parse(v[0]).getPath()) : v[1];
+                      TextView t = Ui.text(this, title, 14, Ui.TEXT, Ui.BODY);
+                      t.setMaxLines(2);
+                      t.setEllipsize(TextUtils.TruncateAt.END);
+                      mid.addView(t);
+                      TextView note = Ui.hint(this, "");
+                      note.setSingleLine(true);
+                      note.setEllipsize(TextUtils.TruncateAt.END);
+                      note.setVisibility(View.GONE);
+                      mid.addView(note);
+                      r.addView(mid, Ui.weight(1));
+                      TextView chip = Ui.chip(this);
+                      r.addView(chip);
+                      rowChips.add(chip);
+                      rowNotes.add(note);
+                      listBox.addView(r, Ui.fill(this, 6));
+                      paintRow(i);
+                  }
+              }
+
+              void paintRow(int i) {
+                  if (i < 0 || i >= rowChips.size()) return;
+                  TextView chip = rowChips.get(i);
+                  switch (vState[i]) {
+                      case ST_SEARCH: Ui.setChip(this, chip, "Mencari", Ui.AMBER); break;
+                      case ST_QUEUED: Ui.setChip(this, chip, "Antre", Ui.AMBER); break;
+                      case ST_DL: Ui.setChip(this, chip, vPct[i] >= 0 ? vPct[i] + "%" : "Mengunduh", Ui.AMBER); break;
+                      case ST_DONE: Ui.setChip(this, chip, "Selesai", Ui.ION); break;
+                      case ST_FAIL: Ui.setChip(this, chip, "Gagal", Ui.PULSE); break;
+                      default: Ui.setChip(this, chip, "Menunggu", Ui.MUTED);
+                  }
+                  TextView note = rowNotes.get(i);
+                  String n = vNote[i];
+                  note.setText(n == null ? "" : n);
+                  note.setTextColor(vState[i] == ST_FAIL ? Ui.PULSE : Ui.MUTED);
+                  note.setVisibility(n == null || n.isEmpty() ? View.GONE : View.VISIBLE);
+              }
+
+              void setState(int i, int st, String note) {
+                  if (i < 0 || i >= vState.length) return;
+                  vState[i] = st;
+                  vNote[i] = note;
+                  paintRow(i);
+              }
+
+              void markFail(String reason) {
+                  log("   x " + reason);
+                  fail++;
+                  setState(idx, ST_FAIL, reason);
+                  refreshUi();
+              }
+
+              void stopScan() {
+                  scanSeq++;
+                  pageQueue.clear();
+                  web.stopLoading();
+                  log("Pemindaian dihentikan.");
+                  finishScan();
+              }
+
+              void stopCapture() {
+                  mode = Mode.IDLE;
+                  paused = false;
+                  capSeq++;
+                  stepSeq++;
+                  if (idx < vState.length && vState[idx] == ST_SEARCH) setState(idx, ST_WAIT, "");
+                  web.stopLoading();
+                  web.loadUrl("about:blank");
+                  getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  log("\nDihentikan. Video yang sudah antre tetap diunduh.");
+                  setStatus("Dihentikan. Video yang sudah antre tetap diunduh.", Ui.AMBER);
+                  refreshUi();
+              }
+
+              // ---------------- PANTAU UNDUHAN ----------------
+
+              final Runnable tracker = new Runnable() {
+                  @Override
+                  public void run() {
+                      tracking = false;
+                      if (dlMap.isEmpty()) return;
+                      boolean active = pollDownloads();
+                      refreshUi();
+                      if (active || !dlMap.isEmpty()) {
+                          tracking = true;
+                          h.postDelayed(this, 1500);
+                      }
+                  }
+              };
+
+              void startTracker() {
+                  if (tracking) return;
+                  tracking = true;
+                  h.postDelayed(tracker, 1000);
+              }
+
+              boolean pollDownloads() {
+                  DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                  long[] ids = new long[dlMap.size()];
+                  int k = 0;
+                  for (Long id : dlMap.keySet()) ids[k++] = id;
+                  Set<Long> seen = new HashSet<>();
+                  List<Long> finished = new ArrayList<>();
+                  boolean active = false;
+                  Cursor cur = null;
+                  try {
+                      cur = dm.query(new DownloadManager.Query().setFilterById(ids));
+                      if (cur == null) return false;
+                      int cId = cur.getColumnIndex(DownloadManager.COLUMN_ID);
+                      int cSt = cur.getColumnIndex(DownloadManager.COLUMN_STATUS);
+                      int cSo = cur.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR);
+                      int cTot = cur.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES);
+                      int cRe = cur.getColumnIndex(DownloadManager.COLUMN_REASON);
+                      while (cur.moveToNext()) {
+                          long id = cur.getLong(cId);
+                          Integer i = dlMap.get(id);
+                          if (i == null) continue;
+                          seen.add(id);
+                          int stt = cur.getInt(cSt);
+                          long so = cur.getLong(cSo), tot = cur.getLong(cTot);
+                          if (stt == DownloadManager.STATUS_SUCCESSFUL) {
+                              vPct[i] = 100;
+                              setState(i, ST_DONE, tot > 0 ? fmtSize(tot) : "");
+                              finished.add(id);
+                          } else if (stt == DownloadManager.STATUS_FAILED) {
+                              setState(i, ST_FAIL, "Unduhan gagal (kode " + cur.getInt(cRe) + ")");
+                              log("   x unduhan gagal: video " + (i + 1) + " (kode " + cur.getInt(cRe) + ")");
+                              finished.add(id);
+                          } else {
+                              active = true;
+                              vPct[i] = tot > 0 ? (int) (so * 100 / tot) : -1;
+                              String note = stt == DownloadManager.STATUS_PAUSED ? "Menunggu jaringan"
+                                      : (tot > 0 ? fmtSize(so) + " dari " + fmtSize(tot) : "");
+                              setState(i, stt == DownloadManager.STATUS_RUNNING ? ST_DL : ST_QUEUED, note);
+                          }
+                      }
+                  } catch (Exception e) {
+                      return false;
+                  } finally {
+                      if (cur != null) cur.close();
+                  }
+                  for (long id : ids) {
+                      if (!seen.contains(id)) {           // dibatalkan dari notifikasi
+                          Integer i = dlMap.get(id);
+                          if (i != null) setState(i, ST_FAIL, "Unduhan dibatalkan");
+                          finished.add(id);
+                      }
+                  }
+                  for (Long id : finished) dlMap.remove(id);
+                  return active;
               }
 
               void setupWebView() {
@@ -463,7 +1335,7 @@ jobs:
                   String url = urlInput.getText().toString().trim();
                   Uri u = Uri.parse(url);
                   if (u.getHost() == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
-                      log("Link tidak valid. Contoh: https://filecoster.com/...");
+                      setStatus("Link belum benar. Contoh: https://filecoster.com/folder/...", Ui.PULSE);
                       return;
                   }
                   String p = patternInput.getText().toString().trim();
@@ -472,7 +1344,7 @@ jobs:
                       linkPattern = Pattern.compile(p.isEmpty() ? DEFAULT_PATTERN : p, Pattern.CASE_INSENSITIVE);
                       folderPattern = fp.isEmpty() ? null : Pattern.compile(fp, Pattern.CASE_INSENSITIVE);
                   } catch (Exception e) {
-                      log("Pola tidak valid: " + e.getMessage());
+                      setStatus("Pola link tidak valid: " + e.getMessage(), Ui.PULSE);
                       return;
                   }
                   baseDomain = baseDomain(u.getHost());
@@ -488,10 +1360,14 @@ jobs:
                   allLinks.clear();
                   videos.clear();
                   foldersScanned = 0;
-                  dlBtn.setEnabled(false);
-                  scanBtn.setEnabled(false);
                   logView.setText("");
+                  vState = new int[0];
+                  vPct = new int[0];
+                  vNote = new String[0];
                   mode = Mode.SCAN;
+                  prefs.edit().putString("url", url).apply();
+                  buildRows();
+                  refreshUi();
                   seenPages.add(stripSlash(url));
                   openScanPage(new String[]{url, "", "0"});
               }
@@ -501,6 +1377,8 @@ jobs:
                   foldersScanned++;
                   String where = page[1].isEmpty() ? "(folder utama)" : page[1];
                   log("Memindai " + where + " ...");
+                  setStatus("Memindai " + where, Ui.AMBER);
+                  refreshUi();
                   web.loadUrl(page[0]);
               }
 
@@ -565,7 +1443,7 @@ jobs:
                                       pageQueue.addFirst(new String[]{href, rel, String.valueOf(depth)});
                                   }
                               } else if (isFolderLink(href, path, text, inNav)) {
-                                  if (!seenPages.contains(key) && depth < MAX_DEPTH) {
+                                  if (subBox.isChecked() && !seenPages.contains(key) && depth < MAX_DEPTH) {
                                       seenPages.add(key);
                                       String name = sanitize(text.isEmpty() ? lastSegment(path) : text);
                                       String childRel = rel.isEmpty() ? name : rel + "/" + name;
@@ -580,7 +1458,8 @@ jobs:
                       } catch (Exception e) {
                           log("Gagal membaca halaman: " + e.getMessage());
                       }
-                      log("   " + newVideos + " video, " + newFolders + " subfolder");
+                      log("   " + newVideos + " video" + (subBox.isChecked() ? ", " + newFolders + " subfolder" : ""));
+                      refreshUi();
                       nextScanPage();
                   });
               }
@@ -597,8 +1476,11 @@ jobs:
               void finishScan() {
                   mode = Mode.IDLE;
                   scanSeq++;
-                  scanBtn.setEnabled(true);
                   if (found.isEmpty()) {
+                      setStatus("Tidak ada video terdeteksi. Lihat Catatan proses untuk detailnya.", Ui.PULSE);
+                      buildRows();
+                      showTab(1);
+                      refreshUi();
                       log("Tidak ada link video yang cocok. Link yang ada di halaman:");
                       int n = 0;
                       for (Map.Entry<String, String> e : allLinks.entrySet()) {
@@ -621,7 +1503,13 @@ jobs:
                       }
                       log(String.format("%4d. %s", i + 1, v[1].isEmpty() ? v[0] : v[1]));
                   }
-                  dlBtn.setEnabled(true);
+                  vState = new int[videos.size()];
+                  vPct = new int[videos.size()];
+                  vNote = new String[videos.size()];
+                  buildRows();
+                  showTab(0);
+                  setStatus(videos.size() + " video siap diunduh.", Ui.ION);
+                  refreshUi();
               }
 
               static String lastSegment(String path) {
@@ -639,10 +1527,11 @@ jobs:
                       requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
                       return;
                   }
-                  scanBtn.setEnabled(false);
-                  dlBtn.setEnabled(false);
                   getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                   prefs.edit().putInt("base", baseSpin.getSelectedItemPosition())
+                          .putInt("save", saveSpin.getSelectedItemPosition())
+                          .putBoolean("sub", subBox.isChecked())
+                          .putBoolean("ads", adBox.isChecked())
                           .putString("folder", cleanFolder(folderInput.getText().toString())).apply();
                   log("Disimpan ke: " + destLabel());
                   mode = Mode.CAPTURE;
@@ -651,6 +1540,8 @@ jobs:
                   idx = 0;
                   ok = 0;
                   fail = 0;
+                  showTab(0);
+                  refreshUi();
                   nextVideo();
               }
 
@@ -662,6 +1553,8 @@ jobs:
 
               void nextVideo() {
                   if (paused || mode != Mode.CAPTURE) return;
+                  while (idx < vState.length && vState[idx] != ST_WAIT && vState[idx] != ST_FAIL
+                          && vState[idx] != ST_SEARCH) idx++;
                   if (idx != retryIdx) {
                       retryIdx = idx;
                       retries = 0;
@@ -671,13 +1564,18 @@ jobs:
                       capSeq++;
                       web.loadUrl("about:blank");
                       getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                      scanBtn.setEnabled(true);
-                      dlBtn.setEnabled(true);
+                      int failedNow = countState(ST_FAIL);
+                      setStatus("Pencarian selesai. Unduhan berjalan di latar belakang"
+                              + (failedNow > 0 ? ", " + failedNow + " gagal." : "."), failedNow > 0 ? Ui.AMBER : Ui.ION);
+                      refreshUi();
                       log("\nSelesai mencari: " + ok + " masuk antrean unduhan, " + fail + " gagal.\n" +
                           "Unduhan berjalan di latar belakang (lihat notifikasi). File ada di " + destLabel() + ".");
                       return;
                   }
                   String[] v = videos.get(idx);
+                  setState(idx, ST_SEARCH, "Membuka halaman dan menekan play");
+                  setStatus("Video " + (idx + 1) + " dari " + videos.size() + ": mencari sumber video", Ui.AMBER);
+                  refreshUi();
                   captured.clear();
                   cand.clear();
                   lastNewCand = 0;
@@ -718,8 +1616,7 @@ jobs:
                           return;
                       }
                       if (now > deadline) {
-                          log("   x sumber video tidak tertangkap");
-                          fail++;
+                          markFail("sumber video tidak tertangkap");
                           advance();
                           return;
                       }
@@ -786,9 +1683,19 @@ jobs:
                   return out.toString();
               }
 
-              String destLabel() {
+              // folder tujuan (relatif terhadap Download/Movies/DCIM) untuk video dengan subfolder "rel"
+              String targetSub(String rel) {
+                  int m = saveSpin.getSelectedItemPosition();
+                  if (m == 2) return "";
                   String sub = cleanFolder(folderInput.getText().toString());
-                  return BASE_NAMES[baseSpin.getSelectedItemPosition()] + (sub.isEmpty() ? "" : "/" + sub);
+                  if (m == 0 && rel != null && !rel.isEmpty()) sub = cleanFolder(sub.isEmpty() ? rel : sub + "/" + rel);
+                  return sub;
+              }
+
+              String destLabel() {
+                  String sub = targetSub(null);
+                  String label = BASE_NAMES[baseSpin.getSelectedItemPosition()] + (sub.isEmpty() ? "" : "/" + sub);
+                  return saveSpin.getSelectedItemPosition() == 0 ? label + " (beserta subfoldernya)" : label;
               }
 
               void addCandidate(String u, double dur) {
@@ -820,6 +1727,7 @@ jobs:
                   final List<String> cookies = new ArrayList<>();
                   for (String u : urls) cookies.add(CookieManager.getInstance().getCookie(u));
                   log("   memeriksa " + urls.size() + " kandidat...");
+                  setState(idx, ST_SEARCH, "Memeriksa " + urls.size() + " kandidat video");
                   bg.execute(() -> {
                       final long[] sizes = new long[urls.size()];
                       for (int i = 0; i < urls.size(); i++) {
@@ -850,12 +1758,10 @@ jobs:
                   if (best >= 0) {
                       enqueue(urls.get(best), referer);
                   } else if (hls != null) {
-                      log("   x video berformat stream (m3u8), belum didukung aplikasi ini");
-                      fail++;
+                      markFail("video berformat stream (m3u8), belum didukung aplikasi ini");
                       advance();
                   } else {
-                      log("   x hanya iklan yang tertangkap, video asli tidak ditemukan");
-                      fail++;
+                      markFail("hanya iklan yang tertangkap, video asli tidak ditemukan");
                       advance();
                   }
               }
@@ -915,18 +1821,17 @@ jobs:
                       r.setTitle(name);
                       r.setDescription("Filecoster Downloader");
                       r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                      String sub = cleanFolder(folderInput.getText().toString());
-                      if (treeBox.isChecked() && v.length > 2 && !v[2].isEmpty()) {
-                          sub = cleanFolder(sub.isEmpty() ? v[2] : sub + "/" + v[2]);
-                      }
+                      String sub = targetSub(v.length > 2 ? v[2] : "");
                       r.setDestinationInExternalPublicDir(BASE_DIRS[baseSpin.getSelectedItemPosition()],
                               sub.isEmpty() ? name : sub + "/" + name);
-                      dm.enqueue(r);
+                      long id = dm.enqueue(r);
+                      dlMap.put(id, idx);
+                      setState(idx, ST_QUEUED, name);
+                      startTracker();
                       log("   OK masuk antrean: " + name);
                       ok++;
                   } catch (Exception e) {
-                      log("   x gagal memulai unduhan: " + e.getMessage());
-                      fail++;
+                      markFail("gagal memulai unduhan: " + e.getMessage());
                   }
                   advance();
               }
@@ -945,6 +1850,7 @@ jobs:
               void onMainFrameError(String desc) {
                   if (mode == Mode.SCAN) {
                       log("Halaman gagal dimuat (" + desc + "). Periksa koneksi, jangan matikan layar, lalu pindai lagi.");
+                      setStatus("Halaman gagal dimuat. Periksa koneksi internet.", Ui.PULSE);
                       return;
                   }
                   if (mode != Mode.CAPTURE || paused) return;
@@ -961,17 +1867,21 @@ jobs:
               @Override
               protected void onStop() {
                   super.onStop();
+                  h.removeCallbacks(tracker);
+                  tracking = false;
                   if (mode == Mode.CAPTURE && !paused) {
                       paused = true;
                       capSeq++;
                       stepSeq++;
                       log("\n|| Dijeda: layar mati atau aplikasi ditinggal. Akan dilanjutkan saat aplikasi dibuka lagi.");
+                      setStatus("Dijeda karena layar mati. Buka aplikasi untuk melanjutkan.", Ui.AMBER);
                   }
               }
 
               @Override
               protected void onStart() {
                   super.onStart();
+                  if (!dlMap.isEmpty()) startTracker();
                   if (mode == Mode.CAPTURE && paused) {
                       paused = false;
                       retryIdx = -1;
@@ -1049,7 +1959,8 @@ jobs:
 
               void log(String s) {
                   logView.append(s + "\n");
-                  logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+                  CharSequence t = logView.getText();
+                  if (t.length() > 60000) logView.setText(t.subSequence(t.length() - 40000, t.length()));
               }
 
               int dp(int v) {
