@@ -62,8 +62,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 2
-                  versionName '1.1'
+                  versionCode 3
+                  versionName '1.2'
               }
 
               compileOptions {
@@ -113,6 +113,7 @@ jobs:
           import android.Manifest;
           import android.app.Activity;
           import android.app.DownloadManager;
+          import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
           import android.graphics.Typeface;
           import android.net.Uri;
@@ -122,7 +123,10 @@ jobs:
           import android.os.Handler;
           import android.os.Looper;
           import android.os.Message;
+          import android.os.SystemClock;
           import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
           import android.view.View;
           import android.view.WindowManager;
           import android.webkit.CookieManager;
@@ -132,11 +136,13 @@ jobs:
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
+          import android.widget.ArrayAdapter;
           import android.widget.Button;
           import android.widget.CheckBox;
           import android.widget.EditText;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
+          import android.widget.Spinner;
           import android.widget.TextView;
 
           import org.json.JSONArray;
@@ -196,20 +202,36 @@ jobs:
                       "try{if(f[j].contentDocument)scan(f[j].contentDocument);}catch(e){}}}catch(e){}}" +
                       "scan(document);return out;})()";
               static final String JS_PLAY =
-                      "(function(){var sels=['.vjs-big-play-button','.plyr__control--overlaid','.jw-icon-display'," +
-                      "'[class*=play i]','[id*=play i]'];" +
-                      "var skips=['[class*=skip i]','[id*=skip i]','[aria-label*=skip i]','[class*=ad-close i]'];" +
-                      "function go(doc){try{for(var i=0;i<sels.length;i++){var el=doc.querySelector(sels[i]);" +
-                      "if(el){try{el.click();}catch(e){}break;}}" +
+                      "(function(){var skips=['[class*=skip i]','[id*=skip i]','[aria-label*=skip i]','[class*=ad-close i]'];" +
+                      "function go(doc){try{" +
                       "for(var a=0;a<skips.length;a++){var ss=doc.querySelectorAll(skips[a]);" +
                       "for(var b=0;b<ss.length;b++){try{ss[b].click();}catch(e){}}}" +
                       "var v=doc.querySelectorAll('video');for(var k=0;k<v.length;k++){v[k].muted=true;" +
                       "var du=v[k].duration;if(isFinite(du)&&du>0&&du<45&&v[k].currentTime<du-0.5){" +
                       "try{v[k].currentTime=du-0.1;}catch(e){}}" +
-                      "var p=v[k].play();if(p&&p.catch)p.catch(function(){});}" +
+                      "if(v[k].paused){var p=v[k].play();if(p&&p.catch)p.catch(function(){});}}" +
                       "var f=doc.querySelectorAll('iframe');for(var j=0;j<f.length;j++){" +
                       "try{if(f[j].contentDocument)go(f[j].contentDocument);}catch(e){}}}catch(e){}}" +
                       "go(document);return true;})()";
+              // cari posisi tombol play (koordinat CSS di layar) untuk diketuk seperti jari sungguhan
+              static final String JS_FIND_PLAY =
+                      "(function(){var sels=['.vjs-big-play-button','.plyr__control--overlaid','.jw-display-icon-container'," +
+                      "'.jw-icon-display','[aria-label*=play i]','[title*=play i]','button[class*=play i]','video','iframe'," +
+                      "'[class*=play i]','[id*=play i]'];" +
+                      "var pl=document.querySelector('video, iframe, [class*=player i]');" +
+                      "if(pl&&pl.scrollIntoView){try{pl.scrollIntoView({block:'center'});}catch(e){}}" +
+                      "function ok(r){return r.width>8&&r.height>8&&r.bottom>0&&r.right>0;}" +
+                      "function find(doc,ox,oy){for(var i=0;i<sels.length;i++){var els=doc.querySelectorAll(sels[i]);" +
+                      "for(var j=0;j<els.length;j++){var el=els[j];var r=el.getBoundingClientRect();if(!ok(r))continue;" +
+                      "if(el.tagName==='IFRAME'){var d=null;try{d=el.contentDocument;}catch(e){}" +
+                      "if(d){var inner=find(d,ox+r.left,oy+r.top);if(inner)return inner;}}" +
+                      "return [ox+r.left+r.width/2,oy+r.top+r.height/2];}}return null;}" +
+                      "var c=find(document,0,0)||[window.innerWidth/2,window.innerHeight/2];" +
+                      "return [c[0],c[1],window.innerWidth,window.innerHeight];})()";
+
+              static final String[] BASE_NAMES = {"Download", "Movies", "DCIM"};
+              static final String[] BASE_DIRS = {Environment.DIRECTORY_DOWNLOADS, Environment.DIRECTORY_MOVIES,
+                      Environment.DIRECTORY_DCIM};
 
               enum Mode { IDLE, SCAN, CAPTURE }
 
@@ -217,6 +239,9 @@ jobs:
               EditText urlInput, patternInput;
               Button scanBtn, dlBtn;
               CheckBox adBox;
+              Spinner baseSpin;
+              EditText folderInput;
+              SharedPreferences prefs;
               volatile boolean adBlock = true;
               final ExecutorService bg = Executors.newSingleThreadExecutor();
               TextView logView;
@@ -277,6 +302,27 @@ jobs:
                   adBox.setChecked(true);
                   adBox.setOnCheckedChangeListener((bt, on) -> adBlock = on);
                   root.addView(adBox);
+
+                  prefs = getSharedPreferences("fc", MODE_PRIVATE);
+                  LinearLayout frow = new LinearLayout(this);
+                  frow.setOrientation(LinearLayout.HORIZONTAL);
+                  frow.setGravity(Gravity.CENTER_VERTICAL);
+                  TextView flabel = new TextView(this);
+                  flabel.setText("Simpan ke:");
+                  frow.addView(flabel);
+                  baseSpin = new Spinner(this);
+                  baseSpin.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, BASE_NAMES));
+                  baseSpin.setSelection(Math.max(0, Math.min(BASE_NAMES.length - 1, prefs.getInt("base", 0))));
+                  frow.addView(baseSpin);
+                  TextView slash = new TextView(this);
+                  slash.setText(" / ");
+                  frow.addView(slash);
+                  folderInput = new EditText(this);
+                  folderInput.setSingleLine(true);
+                  folderInput.setHint("nama folder");
+                  folderInput.setText(prefs.getString("folder", "Filecoster"));
+                  frow.addView(folderInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                  root.addView(frow);
 
                   LinearLayout row = new LinearLayout(this);
                   row.setOrientation(LinearLayout.HORIZONTAL);
@@ -494,6 +540,9 @@ jobs:
                   scanBtn.setEnabled(false);
                   dlBtn.setEnabled(false);
                   getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  prefs.edit().putInt("base", baseSpin.getSelectedItemPosition())
+                          .putString("folder", cleanFolder(folderInput.getText().toString())).apply();
+                  log("Disimpan ke: " + destLabel());
                   mode = Mode.CAPTURE;
                   idx = 0;
                   ok = 0;
@@ -516,7 +565,7 @@ jobs:
                       scanBtn.setEnabled(true);
                       dlBtn.setEnabled(true);
                       log("\nSelesai mencari: " + ok + " masuk antrean unduhan, " + fail + " gagal.\n" +
-                          "Unduhan berjalan di latar belakang (lihat notifikasi). File ada di Download/Filecoster.");
+                          "Unduhan berjalan di latar belakang (lihat notifikasi). File ada di " + destLabel() + ".");
                       return;
                   }
                   String[] v = videos.get(idx);
@@ -564,10 +613,13 @@ jobs:
                           advance();
                           return;
                       }
-                      if (pollCount % 2 == 1 && pollCount <= 30) {
-                          web.evaluateJavascript(JS_PLAY, null); // klik play, lewati/percepat iklan
+                      boolean real = hasRealCandidate();
+                      if (!real && pollCount % 2 == 1 && pollCount <= 30) {
+                          tapPlay(seq);                           // ketuk tombol play seperti jari sungguhan
+                      } else if (pollCount % 2 == 0 && pollCount <= 30) {
+                          web.evaluateJavascript(JS_PLAY, null);  // lewati/percepat iklan, pastikan video berputar
                       }
-                      if (!jumpedToIframe && pollCount >= 4 && !hasRealCandidate() && !iframes.isEmpty()) {
+                      if (!jumpedToIframe && pollCount >= 6 && !real && !iframes.isEmpty()) {
                           String target = pickIframe(iframes);
                           if (target != null) {
                               jumpedToIframe = true;
@@ -581,6 +633,52 @@ jobs:
                       }
                       h.postDelayed(() -> poll(seq), 1500);
                   });
+              }
+
+              void tapPlay(final int seq) {
+                  web.evaluateJavascript(JS_FIND_PLAY, v -> {
+                      if (seq != capSeq) return;
+                      try {
+                          JSONArray a = new JSONArray(v);
+                          double cx = a.getDouble(0), cy = a.getDouble(1), iw = a.getDouble(2), ih = a.getDouble(3);
+                          if (iw <= 0 || ih <= 0) return;
+                          float x = (float) (cx * web.getWidth() / iw);
+                          float y = (float) (cy * web.getHeight() / ih);
+                          x = Math.max(2, Math.min(web.getWidth() - 2, x));
+                          y = Math.max(2, Math.min(web.getHeight() - 2, y));
+                          nativeTap(x, y);
+                      } catch (Exception e) {
+                          nativeTap(web.getWidth() / 2f, web.getHeight() / 2f);
+                      }
+                  });
+              }
+
+              void nativeTap(final float x, final float y) {
+                  final long t = SystemClock.uptimeMillis();
+                  MotionEvent down = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0);
+                  web.dispatchTouchEvent(down);
+                  down.recycle();
+                  h.postDelayed(() -> {
+                      MotionEvent up = MotionEvent.obtain(t, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0);
+                      web.dispatchTouchEvent(up);
+                      up.recycle();
+                  }, 90);
+              }
+
+              static String cleanFolder(String f) {
+                  StringBuilder out = new StringBuilder();
+                  for (String part : f.replaceAll("[\\\\:*?\"<>|]", "").split("/")) {
+                      String t = part.trim();
+                      if (t.isEmpty() || t.equals(".") || t.equals("..")) continue;
+                      if (out.length() > 0) out.append('/');
+                      out.append(t);
+                  }
+                  return out.toString();
+              }
+
+              String destLabel() {
+                  String sub = cleanFolder(folderInput.getText().toString());
+                  return BASE_NAMES[baseSpin.getSelectedItemPosition()] + (sub.isEmpty() ? "" : "/" + sub);
               }
 
               void addCandidate(String u, double dur) {
@@ -707,7 +805,9 @@ jobs:
                       r.setTitle(name);
                       r.setDescription("Filecoster Downloader");
                       r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                      r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Filecoster/" + name);
+                      String sub = cleanFolder(folderInput.getText().toString());
+                      r.setDestinationInExternalPublicDir(BASE_DIRS[baseSpin.getSelectedItemPosition()],
+                              sub.isEmpty() ? name : sub + "/" + name);
                       dm.enqueue(r);
                       log("   OK masuk antrean: " + name);
                       ok++;
