@@ -62,8 +62,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 2
+                  versionName '1.1'
               }
 
               compileOptions {
@@ -133,6 +133,7 @@ jobs:
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
           import android.widget.Button;
+          import android.widget.CheckBox;
           import android.widget.EditText;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
@@ -141,6 +142,9 @@ jobs:
           import org.json.JSONArray;
           import org.json.JSONObject;
 
+          import java.io.ByteArrayInputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
           import java.util.ArrayDeque;
           import java.util.ArrayList;
           import java.util.Collections;
@@ -151,6 +155,8 @@ jobs:
           import java.util.List;
           import java.util.Map;
           import java.util.Set;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
           import java.util.regex.Pattern;
 
           public class MainActivity extends Activity {
@@ -161,7 +167,17 @@ jobs:
               static final Pattern SEGMENT = Pattern.compile("\\.(ts|m4s|aac)(\\?|$)", Pattern.CASE_INSENSITIVE);
               static final Pattern SKIP = Pattern.compile(
                       "(login|register|signup|logout|premium|upgrade|contact|terms|privacy|dmca|faq|about)", Pattern.CASE_INSENSITIVE);
-              static final long CAPTURE_TIMEOUT_MS = 40000;
+              static final Pattern AD = Pattern.compile(
+                      "(doubleclick|googlesyndication|googleadservices|adservice|imasdk|adserver|adsystem|adnxs|"
+                      + "/ads?[/_.?=-]|[/_.-]ads?[/_.?=-]|//(ads?|pop\\w*|track\\w*|click\\w*)\\.|"
+                      + "vast|vpaid|preroll|pre-roll|popunder|popads|propeller|adsterra|exoclick|exosrv|juicyads|"
+                      + "trafficjunky|trafficstars|tsyndicate|hilltopads|clickadu|adcash|a-ads|adskeeper|mgid|"
+                      + "taboola|outbrain|clickunder|prebid|monetag|onclicka|richads|galaksion|admaven|bidvertiser)",
+                      Pattern.CASE_INSENSITIVE);
+              static final long CAPTURE_TIMEOUT_MS = 60000;
+              static final long SETTLE_MS = 10000;          // tunggu sejak kandidat terakhir muncul
+              static final double AD_MAX_DURATION = 45;     // video < 45 detik dianggap iklan
+              static final long AD_MAX_SIZE = 1500000;      // file < 1,5 MB dianggap iklan
 
               static final String JS_LINKS =
                       "(function(){var a=document.querySelectorAll('a[href]');var r=[];" +
@@ -172,7 +188,9 @@ jobs:
               static final String JS_POLL =
                       "(function(){var out={media:[],iframes:[]};" +
                       "function scan(doc){try{var v=doc.querySelectorAll('video, video source');" +
-                      "for(var i=0;i<v.length;i++){var s=v[i].currentSrc||v[i].src;if(s&&s.indexOf('http')===0)out.media.push(s);}" +
+                      "for(var i=0;i<v.length;i++){var s=v[i].currentSrc||v[i].src;var d=0;" +
+                      "try{var vv=v[i].tagName==='SOURCE'?v[i].parentNode:v[i];d=isFinite(vv.duration)?vv.duration:0;}catch(e){}" +
+                      "if(s&&s.indexOf('http')===0)out.media.push([s,d]);}" +
                       "var f=doc.querySelectorAll('iframe');" +
                       "for(var j=0;j<f.length;j++){if(f[j].src&&f[j].src.indexOf('http')===0)out.iframes.push(f[j].src);" +
                       "try{if(f[j].contentDocument)scan(f[j].contentDocument);}catch(e){}}}catch(e){}}" +
@@ -180,9 +198,14 @@ jobs:
               static final String JS_PLAY =
                       "(function(){var sels=['.vjs-big-play-button','.plyr__control--overlaid','.jw-icon-display'," +
                       "'[class*=play i]','[id*=play i]'];" +
+                      "var skips=['[class*=skip i]','[id*=skip i]','[aria-label*=skip i]','[class*=ad-close i]'];" +
                       "function go(doc){try{for(var i=0;i<sels.length;i++){var el=doc.querySelector(sels[i]);" +
                       "if(el){try{el.click();}catch(e){}break;}}" +
+                      "for(var a=0;a<skips.length;a++){var ss=doc.querySelectorAll(skips[a]);" +
+                      "for(var b=0;b<ss.length;b++){try{ss[b].click();}catch(e){}}}" +
                       "var v=doc.querySelectorAll('video');for(var k=0;k<v.length;k++){v[k].muted=true;" +
+                      "var du=v[k].duration;if(isFinite(du)&&du>0&&du<45&&v[k].currentTime<du-0.5){" +
+                      "try{v[k].currentTime=du-0.1;}catch(e){}}" +
                       "var p=v[k].play();if(p&&p.catch)p.catch(function(){});}" +
                       "var f=doc.querySelectorAll('iframe');for(var j=0;j<f.length;j++){" +
                       "try{if(f[j].contentDocument)go(f[j].contentDocument);}catch(e){}}}catch(e){}}" +
@@ -193,6 +216,9 @@ jobs:
               final Handler h = new Handler(Looper.getMainLooper());
               EditText urlInput, patternInput;
               Button scanBtn, dlBtn;
+              CheckBox adBox;
+              volatile boolean adBlock = true;
+              final ExecutorService bg = Executors.newSingleThreadExecutor();
               TextView logView;
               ScrollView logScroll;
               WebView web;
@@ -212,6 +238,8 @@ jobs:
               // capture
               final List<String[]> videos = new ArrayList<>();
               final Set<String> captured = Collections.synchronizedSet(new LinkedHashSet<String>());
+              final LinkedHashMap<String, Double> cand = new LinkedHashMap<>();
+              long lastNewCand;
               int idx, ok, fail, pollCount, capSeq = 0;
               boolean jumpedToIframe;
               long deadline;
@@ -243,6 +271,12 @@ jobs:
                   patternInput.setSingleLine(true);
                   patternInput.setTextSize(13);
                   root.addView(patternInput);
+
+                  adBox = new CheckBox(this);
+                  adBox.setText("Blokir iklan (matikan jika situs jadi error)");
+                  adBox.setChecked(true);
+                  adBox.setOnCheckedChangeListener((bt, on) -> adBlock = on);
+                  root.addView(adBox);
 
                   LinearLayout row = new LinearLayout(this);
                   row.setOrientation(LinearLayout.HORIZONTAL);
@@ -302,7 +336,11 @@ jobs:
 
                       @Override
                       public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
-                          noteResource(req.getUrl().toString());
+                          String u = req.getUrl().toString();
+                          if (adBlock && !req.isForMainFrame() && isAd(u)) {
+                              return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
+                          }
+                          noteResource(u);
                           return null;
                       }
 
@@ -315,7 +353,7 @@ jobs:
 
               void noteResource(String u) {
                   if (mode == Mode.CAPTURE && u != null && u.startsWith("http")
-                          && MEDIA.matcher(u).find() && !SEGMENT.matcher(u).find()) {
+                          && MEDIA.matcher(u).find() && !SEGMENT.matcher(u).find() && !isAd(u)) {
                       captured.add(u);
                   }
               }
@@ -483,6 +521,8 @@ jobs:
                   }
                   String[] v = videos.get(idx);
                   captured.clear();
+                  cand.clear();
+                  lastNewCand = 0;
                   allowedHosts.clear();
                   jumpedToIframe = false;
                   pollCount = 0;
@@ -497,46 +537,37 @@ jobs:
                   if (seq != capSeq) return;
                   web.evaluateJavascript(JS_POLL, v -> {
                       if (seq != capSeq) return;
-                      List<String> media = new ArrayList<>();
                       List<String> iframes = new ArrayList<>();
                       try {
                           JSONObject o = new JSONObject(v);
                           JSONArray m = o.optJSONArray("media");
                           JSONArray f = o.optJSONArray("iframes");
-                          if (m != null) for (int i = 0; i < m.length(); i++) media.add(m.getString(i));
+                          if (m != null) for (int i = 0; i < m.length(); i++) {
+                              JSONArray it = m.optJSONArray(i);
+                              if (it != null) addCandidate(it.optString(0, ""), it.optDouble(1, 0));
+                          }
                           if (f != null) for (int i = 0; i < f.length(); i++) iframes.add(f.getString(i));
                       } catch (Exception ignored) { }
-                      synchronized (captured) { media.addAll(captured); }
-
-                      String direct = null, hls = null;
-                      for (String s : media) {
-                          if (s.toLowerCase().contains(".m3u8")) {
-                              if (hls == null || s.toLowerCase().contains("master")) hls = s;
-                          } else if (direct == null) {
-                              direct = s;
-                          }
-                      }
+                      List<String> net;
+                      synchronized (captured) { net = new ArrayList<>(captured); }
+                      for (String u : net) addCandidate(u, 0);
                       pollCount++;
-                      if (direct != null) {
-                          enqueue(direct);
+                      long now = System.currentTimeMillis();
+
+                      if (!cand.isEmpty() && (now - lastNewCand >= SETTLE_MS || now > deadline)) {
+                          decide(seq);
                           return;
                       }
-                      if (hls != null && pollCount >= 6) {
-                          log("   x video berformat stream (m3u8), belum didukung aplikasi ini:\n     " + hls);
-                          fail++;
-                          advance();
-                          return;
-                      }
-                      if (System.currentTimeMillis() > deadline) {
+                      if (now > deadline) {
                           log("   x sumber video tidak tertangkap");
                           fail++;
                           advance();
                           return;
                       }
-                      if (pollCount % 2 == 1 && pollCount <= 9) {
-                          web.evaluateJavascript(JS_PLAY, null);
+                      if (pollCount % 2 == 1 && pollCount <= 30) {
+                          web.evaluateJavascript(JS_PLAY, null); // klik play, lewati/percepat iklan
                       }
-                      if (!jumpedToIframe && pollCount >= 4 && !iframes.isEmpty()) {
+                      if (!jumpedToIframe && pollCount >= 4 && !hasRealCandidate() && !iframes.isEmpty()) {
                           String target = pickIframe(iframes);
                           if (target != null) {
                               jumpedToIframe = true;
@@ -552,21 +583,118 @@ jobs:
                   });
               }
 
+              void addCandidate(String u, double dur) {
+                  if (u == null || !u.startsWith("http") || SEGMENT.matcher(u).find() || isAd(u)) return;
+                  Double old = cand.get(u);
+                  if (old == null) {
+                      if (cand.size() >= 20) return;
+                      cand.put(u, dur);
+                      lastNewCand = System.currentTimeMillis();
+                  } else if (dur > 0 && old <= 0) {
+                      cand.put(u, dur);
+                  }
+              }
+
+              boolean hasRealCandidate() {
+                  for (Map.Entry<String, Double> e : cand.entrySet()) {
+                      if (isHls(e.getKey())) continue;
+                      double d = e.getValue();
+                      if (d <= 0 || d >= AD_MAX_DURATION) return true;
+                  }
+                  return false;
+              }
+
+              void decide(final int seq) {
+                  final List<String> urls = new ArrayList<>(cand.keySet());
+                  final List<Double> durs = new ArrayList<>(cand.values());
+                  final String referer = web.getUrl();
+                  final String ua = web.getSettings().getUserAgentString();
+                  final List<String> cookies = new ArrayList<>();
+                  for (String u : urls) cookies.add(CookieManager.getInstance().getCookie(u));
+                  log("   memeriksa " + urls.size() + " kandidat...");
+                  bg.execute(() -> {
+                      final long[] sizes = new long[urls.size()];
+                      for (int i = 0; i < urls.size(); i++) {
+                          sizes[i] = isHls(urls.get(i)) ? -1 : probeSize(urls.get(i), referer, ua, cookies.get(i));
+                      }
+                      h.post(() -> { if (seq == capSeq) choose(urls, durs, sizes, referer); });
+                  });
+              }
+
+              void choose(List<String> urls, List<Double> durs, long[] sizes, String referer) {
+                  int best = -1;
+                  String hls = null;
+                  for (int i = 0; i < urls.size(); i++) {
+                      String u = urls.get(i);
+                      double d = durs.get(i);
+                      long sz = sizes[i];
+                      boolean adLike = (d > 0 && d < AD_MAX_DURATION) || (sz >= 0 && sz < AD_MAX_SIZE);
+                      log("   kandidat: " + fmtSize(sz) + ", " + fmtDur(d) + (adLike ? " [iklan?]" : "") + "\n     " + shorten(u));
+                      if (isHls(u)) {
+                          if (hls == null || u.toLowerCase().contains("master")) hls = u;
+                          continue;
+                      }
+                      if (adLike) continue;
+                      if (best < 0) { best = i; continue; }
+                      long bs = Math.max(sizes[best], 0), cs = Math.max(sz, 0);
+                      if (cs > bs || (cs == bs && d >= durs.get(best))) best = i;
+                  }
+                  if (best >= 0) {
+                      enqueue(urls.get(best), referer);
+                  } else if (hls != null) {
+                      log("   x video berformat stream (m3u8), belum didukung aplikasi ini");
+                      fail++;
+                      advance();
+                  } else {
+                      log("   x hanya iklan yang tertangkap, video asli tidak ditemukan");
+                      fail++;
+                      advance();
+                  }
+              }
+
+              static long probeSize(String url, String referer, String ua, String cookie) {
+                  HttpURLConnection c = null;
+                  try {
+                      c = (HttpURLConnection) new URL(url).openConnection();
+                      c.setConnectTimeout(10000);
+                      c.setReadTimeout(10000);
+                      c.setInstanceFollowRedirects(true);
+                      c.setRequestProperty("Range", "bytes=0-0");
+                      c.setRequestProperty("User-Agent", ua);
+                      if (referer != null) c.setRequestProperty("Referer", referer);
+                      if (cookie != null) c.setRequestProperty("Cookie", cookie);
+                      int code = c.getResponseCode();
+                      if (code >= 400) return -1;
+                      String cr = c.getHeaderField("Content-Range");
+                      if (cr != null && cr.lastIndexOf('/') >= 0) {
+                          String t = cr.substring(cr.lastIndexOf('/') + 1).trim();
+                          if (!t.equals("*")) return Long.parseLong(t);
+                      }
+                      return code == 200 ? c.getContentLengthLong() : -1;
+                  } catch (Exception e) {
+                      return -1;
+                  } finally {
+                      if (c != null) c.disconnect();
+                  }
+              }
+
               String pickIframe(List<String> iframes) {
                   for (String s : iframes) {
                       String l = s.toLowerCase();
+                      if (isAd(s)) continue;
                       if (l.contains("stream") || l.contains("embed") || l.contains("player")) return s;
                   }
                   for (String s : iframes) {
+                      if (isAd(s)) continue;
                       String host = Uri.parse(s).getHost();
                       if (host != null && sameSite(host)) return s;
                   }
                   return null;
               }
 
-              void enqueue(String media) {
+              void enqueue(String media, String referer) {
                   String[] v = videos.get(idx);
-                  String referer = web.getUrl() == null ? v[0] : web.getUrl();
+                  if (referer == null) referer = v[0];
                   String title = v[1].isEmpty() ? (web.getTitle() == null ? "video" : web.getTitle()) : v[1];
                   String name = String.format("%03d - %s%s", idx + 1, sanitize(title), extOf(media));
                   try {
@@ -597,6 +725,26 @@ jobs:
               }
 
               // ---------------- BANTUAN ----------------
+
+              static boolean isAd(String url) {
+                  return AD.matcher(url).find();
+              }
+
+              static boolean isHls(String url) {
+                  return url.toLowerCase().contains(".m3u8");
+              }
+
+              static String fmtSize(long b) {
+                  return b < 0 ? "ukuran ?" : String.format("%.1f MB", b / 1048576.0);
+              }
+
+              static String fmtDur(double d) {
+                  return d <= 0 ? "durasi ?" : String.format("%.0f dtk", d);
+              }
+
+              static String shorten(String u) {
+                  return u.length() > 90 ? u.substring(0, 90) + "..." : u;
+              }
 
               boolean isAllowed(String url) {
                   String host = Uri.parse(url).getHost();
