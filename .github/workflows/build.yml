@@ -62,8 +62,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 8
-                  versionName '2.1'
+                  versionCode 10
+                  versionName '2.3'
               }
 
               compileOptions {
@@ -726,6 +726,7 @@ jobs:
               static final Pattern BACK_TEXT = Pattern.compile(
                       "^(\\.\\.|kembali|back|up|parent|home|beranda|induk)$", Pattern.CASE_INSENSITIVE);
               static final int MAX_SCAN_PAGES = 400, MAX_DEPTH = 12;
+              static final Pattern DIRECT = Pattern.compile("\\.(mp4|webm|mkv|mov|m4v)$", Pattern.CASE_INSENSITIVE);
               static final long CAPTURE_TIMEOUT_MS = 60000;
               static final long SETTLE_MS = 10000;          // tunggu sejak kandidat terakhir muncul
               static final double AD_MAX_DURATION = 45;     // video < 45 detik dianggap iklan
@@ -742,9 +743,9 @@ jobs:
               static final String JS_POLL =
                       "(function(){var out={media:[],iframes:[]};" +
                       "function scan(doc){try{var v=doc.querySelectorAll('video, video source');" +
-                      "for(var i=0;i<v.length;i++){var s=v[i].currentSrc||v[i].src;var d=0;" +
-                      "try{var vv=v[i].tagName==='SOURCE'?v[i].parentNode:v[i];d=isFinite(vv.duration)?vv.duration:0;}catch(e){}" +
-                      "if(s&&s.indexOf('http')===0)out.media.push([s,d]);}" +
+                      "for(var i=0;i<v.length;i++){var s=v[i].currentSrc||v[i].src;var d=0,rs=0;" +
+                      "try{var vv=v[i].tagName==='SOURCE'?v[i].parentNode:v[i];d=isFinite(vv.duration)?vv.duration:0;rs=vv.readyState||0;}catch(e){}" +
+                      "if(s&&s.indexOf('http')===0)out.media.push([s,d,rs]);}" +
                       "var f=doc.querySelectorAll('iframe');" +
                       "for(var j=0;j<f.length;j++){if(f[j].src&&f[j].src.indexOf('http')===0)out.iframes.push(f[j].src);" +
                       "try{if(f[j].contentDocument)scan(f[j].contentDocument);}catch(e){}}}catch(e){}}" +
@@ -785,7 +786,7 @@ jobs:
               static final String[] BASE_DIRS = {Environment.DIRECTORY_DOWNLOADS, Environment.DIRECTORY_MOVIES,
                       Environment.DIRECTORY_DCIM};
 
-              enum Mode { IDLE, SCAN, CAPTURE }
+              enum Mode { IDLE, SCAN, CAPTURE, DOWNLOAD }
 
               final Handler h = new Handler(Looper.getMainLooper());
               EditText urlInput, patternInput;
@@ -797,13 +798,22 @@ jobs:
               FrameLayout webFrame;
               RingView ring;
               boolean previewOpen;
-              static final int ST_WAIT = 0, ST_SEARCH = 1, ST_QUEUED = 2, ST_DL = 3, ST_DONE = 4, ST_FAIL = 5;
+              static final int ST_WAIT = 0, ST_SEARCH = 1, ST_QUEUED = 2, ST_DL = 3, ST_DONE = 4, ST_FAIL = 5, ST_READY = 6;
+              static final String[] PAR_NAMES = {"1 (satu per satu)", "2 sekaligus", "3 sekaligus", "5 sekaligus"};
+              static final int[] PAR_VALUES = {1, 2, 3, 5};
               int[] vState = new int[0], vPct = new int[0];
               String[] vNote = new String[0];
               final List<TextView> rowChips = new ArrayList<>(), rowNotes = new ArrayList<>();
               final Map<Long, Integer> dlMap = new HashMap<>();
               boolean tracking;
-              CheckBox keepBox;
+              CheckBox keepBox, fastBox, autoBox;
+              Spinner parSpin;
+              final ArrayDeque<Integer> dlQueue = new ArrayDeque<>();
+              String[] rUrl, rRef, rName;   // link unduhan yang sudah terkumpul (tahap 1)
+              TextView singleBtn;
+              String pageTitle;
+              boolean earlyDecision, fastOff;
+              final Set<String> readyUrls = new HashSet<>();
               TextView batteryStatus, batteryBtn;
               String lastNotif = "";
               boolean loadingPrefs = true;
@@ -915,7 +925,7 @@ jobs:
                   // link + tombol utama
                   LinearLayout linkCard = Ui.card(this, false);
                   linkCard.addView(Ui.title(this, "Link folder"));
-                  linkCard.addView(Ui.hint(this, "Salin link folder dari browser, lalu tempel di sini."), Ui.fill(this, 2));
+                  linkCard.addView(Ui.hint(this, "Tempel link folder untuk dipindai, atau link satu video untuk diunduh langsung."), Ui.fill(this, 2));
                   LinearLayout lrow = Ui.row(this);
                   urlInput = Ui.input(this, "https://filecoster.com/...");
                   urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
@@ -928,6 +938,8 @@ jobs:
                   linkCard.addView(lrow, Ui.fill(this, 12));
                   mainBtn = Ui.primary(this, "Pindai folder");
                   linkCard.addView(mainBtn, Ui.fill(this, 14));
+                  singleBtn = Ui.ghost(this, "Unduh langsung (satu video)");
+                  linkCard.addView(singleBtn, Ui.fill(this, 8));
                   secBtn = Ui.ghost(this, "Pindai ulang");
                   linkCard.addView(secBtn, Ui.fill(this, 8));
                   root.addView(linkCard, Ui.fill(this, 12));
@@ -962,6 +974,24 @@ jobs:
                   batteryBtn.setTextSize(13);
                   brow.addView(batteryBtn);
                   settingsBody.addView(brow, Ui.fill(this, 10));
+
+                  settingsBody.addView(section("Pencarian video"), Ui.fill(this, 22));
+                  fastBox = Ui.check(this, "Unduh langsung saat video siap diputar", prefs.getBoolean("fast", true));
+                  settingsBody.addView(fastBox, Ui.fill(this, 4));
+                  TextView fastHint = Ui.hint(this, "Begitu video asli siap diputar, alamatnya langsung diambil dan "
+                          + "unduhan dimulai, tanpa menunggu 10 detik. Matikan jika sering salah mengambil iklan.");
+                  fastHint.setPadding(dp(32), 0, 0, 0);
+                  settingsBody.addView(fastHint);
+
+                  settingsBody.addView(section("Unduhan"), Ui.fill(this, 22));
+                  autoBox = Ui.check(this, "Mulai unduh otomatis setelah semua link terkumpul", prefs.getBoolean("auto", true));
+                  settingsBody.addView(autoBox, Ui.fill(this, 4));
+                  settingsBody.addView(label("Unduhan bersamaan"), Ui.fill(this, 10));
+                  parSpin = Ui.spinner(this, PAR_NAMES);
+                  parSpin.setSelection(Math.max(0, Math.min(PAR_NAMES.length - 1, prefs.getInt("par", 1))));
+                  settingsBody.addView(parSpin, Ui.fill(this, 6));
+                  settingsBody.addView(Ui.hint(this, "Tahap 1 mengumpulkan semua link dulu, baru tahap 2 mengunduhnya. "
+                          + "Angka kecil lebih aman jika server membatasi koneksi."), Ui.fill(this, 8));
 
                   settingsBody.addView(section("Pemindaian"), Ui.fill(this, 22));
                   subBox = Ui.check(this, "Ikut pindai subfolder (folder di dalam folder)", prefs.getBoolean("sub", true));
@@ -1084,7 +1114,11 @@ jobs:
                   // aksi
                   darkBtn.setOnClickListener(v -> setDark(true));
                   mainBtn.setOnClickListener(v -> onMainAction());
-                  secBtn.setOnClickListener(v -> startScan());
+                  secBtn.setOnClickListener(v -> {
+                      if (countState(ST_READY) > 0 && pendingCount() > 0) startCollect();
+                      else startScan();
+                  });
+                  singleBtn.setOnClickListener(v -> startSingle());
                   pasteBtn.setOnClickListener(v -> pasteLink());
                   copyLogBtn.setOnClickListener(v -> copyLog());
                   shead.setOnClickListener(v -> {
@@ -1108,6 +1142,8 @@ jobs:
                       updateSettingsSummary();
                       saveSettings();
                   });
+                  fastBox.setOnCheckedChangeListener((bt, on) -> saveSettings());
+                  autoBox.setOnCheckedChangeListener((bt, on) -> saveSettings());
                   keepBox.setOnCheckedChangeListener((bt, on) -> {
                       saveSettings();
                       refreshUi();
@@ -1133,6 +1169,7 @@ jobs:
                   };
                   baseSpin.setOnItemSelectedListener(sel);
                   saveSpin.setOnItemSelectedListener(sel);
+                  parSpin.setOnItemSelectedListener(sel);
                   folderInput.addTextChangedListener(new TextWatcher() {
                       public void beforeTextChanged(CharSequence c, int a, int b, int d) { }
                       public void onTextChanged(CharSequence c, int a, int b, int d) { }
@@ -1212,6 +1249,9 @@ jobs:
                           .putBoolean("sub", subBox.isChecked())
                           .putBoolean("ads", adBox.isChecked())
                           .putBoolean("keep", keepBox.isChecked())
+                          .putBoolean("fast", fastBox.isChecked())
+                          .putBoolean("auto", autoBox.isChecked())
+                          .putInt("par", parSpin.getSelectedItemPosition())
                           .apply();
               }
 
@@ -1258,16 +1298,60 @@ jobs:
                   if (mode == Mode.SCAN) {
                       text = "Memindai folder: " + found.size() + " video ditemukan";
                       pct = -1;
+                  } else if (mode == Mode.DOWNLOAD) {
+                      text = "Mengunduh: " + done + " dari " + total + " selesai";
+                      pct = total == 0 ? -1 : done * 100 / total;
                   } else {
                       int cur = Math.min(idx + 1, Math.max(total, 1));
-                      text = "Mencari video " + cur + " dari " + total + ", " + done + " selesai";
-                      pct = total == 0 ? -1 : (done + active) * 100 / total;
+                      int rd = countState(ST_READY);
+                      text = "Mengumpulkan link " + cur + " dari " + total + ", " + rd + " siap";
+                      pct = total == 0 ? -1 : rd * 100 / total;
                   }
                   String key = text + "|" + pct;
                   if (!key.equals(lastNotif) || !KeepAliveService.running) {
                       lastNotif = key;
                       KeepAliveService.update(this, text, pct);
                   }
+              }
+
+              /** Unduh satu video langsung dari link halaman video (atau link file .mp4), tanpa memindai folder. */
+              void startSingle() {
+                  if (mode != Mode.IDLE) return;
+                  String url = urlInput.getText().toString().trim();
+                  Uri u = Uri.parse(url);
+                  if (u.getHost() == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
+                      setStatus("Link belum benar. Tempel link halaman video atau link file video.", Ui.PULSE);
+                      return;
+                  }
+                  baseDomain = baseDomain(u.getHost());
+                  allowedHosts.clear();
+                  pageQueue.clear();
+                  found.clear();
+                  allLinks.clear();
+                  foldersScanned = 0;
+                  logView.setText("");
+                  videos.clear();
+                  videos.add(new String[]{url, "", ""});
+                  vState = new int[1];
+                  vPct = new int[1];
+                  vNote = new String[1];
+                  rUrl = null;
+                  buildRows();
+                  showTab(0);
+                  startCollect();
+              }
+
+              static String stripExt(String n) {
+                  int d = n.lastIndexOf('.');
+                  return d > 0 ? n.substring(0, d) : n;
+              }
+
+              boolean fastReady() {
+                  if (fastOff || !fastBox.isChecked()) return false;
+                  for (String u : readyUrls) {
+                      if (cand.containsKey(u) && !isHls(u)) return true;
+                  }
+                  return false;
               }
 
               void pasteLink() {
@@ -1292,7 +1376,9 @@ jobs:
               void onMainAction() {
                   if (mode == Mode.SCAN) stopScan();
                   else if (mode == Mode.CAPTURE) stopCapture();
-                  else if (pendingCount() > 0) startDownloadAll();
+                  else if (mode == Mode.DOWNLOAD) stopDownloads();
+                  else if (countState(ST_READY) > 0) startDownloads();
+                  else if (pendingCount() > 0) startCollect();
                   else startScan();
               }
 
@@ -1309,7 +1395,8 @@ jobs:
               void refreshUi() {
                   int total = videos.size();
                   int done = countState(ST_DONE), failed = countState(ST_FAIL);
-                  int active = countState(ST_SEARCH) + countState(ST_QUEUED) + countState(ST_DL);
+                  int ready = countState(ST_READY);
+                  int active = countState(ST_SEARCH) + countState(ST_QUEUED) + countState(ST_DL) + ready;
                   int pending = pendingCount();
 
                   statFolders.setText(String.valueOf(foldersScanned));
@@ -1327,6 +1414,9 @@ jobs:
                       if (total == 0) {
                           ring.setProgress(0, 0, 0);
                           ring.setCenter("0", "belum ada video");
+                      } else if (mode == Mode.CAPTURE) {
+                          ring.setProgress(0, (float) ready / total, (float) failed / total);
+                          ring.setCenter(String.valueOf(ready), "dari " + total + " link");
                       } else {
                           float t = total;
                           float partial = 0;
@@ -1342,24 +1432,33 @@ jobs:
                       mainBtn.setText("Hentikan pemindaian");
                       Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
                   } else if (mode == Mode.CAPTURE) {
-                      mainBtn.setText("Hentikan");
+                      mainBtn.setText("Hentikan pengumpulan link");
                       Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
+                  } else if (mode == Mode.DOWNLOAD) {
+                      mainBtn.setText("Hentikan antrean unduhan");
+                      Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
+                  } else if (ready > 0) {
+                      mainBtn.setText("Mulai unduh " + ready + " video");
+                      Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
                   } else if (pending > 0) {
                       boolean onlyFailed = countState(ST_WAIT) == 0;
-                      mainBtn.setText(onlyFailed ? "Coba lagi " + pending + " video gagal" : "Unduh " + pending + " video");
+                      mainBtn.setText(onlyFailed ? "Coba lagi " + pending + " video gagal" : "Kumpulkan link " + pending + " video");
                       Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
                   } else {
                       mainBtn.setText("Pindai folder");
                       Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
                   }
-                  secBtn.setVisibility(mode == Mode.IDLE && pending > 0 ? View.VISIBLE : View.GONE);
+                  secBtn.setText(ready > 0 && pending > 0 ? "Kumpulkan " + pending + " link yang belum" : "Pindai ulang");
+                  secBtn.setVisibility(mode == Mode.IDLE && (pending > 0 || ready > 0) ? View.VISIBLE : View.GONE);
+                  singleBtn.setVisibility(mode == Mode.IDLE ? View.VISIBLE : View.GONE);
 
                   boolean busy = mode != Mode.IDLE;
                   urlInput.setEnabled(!busy);
                   pasteBtn.setEnabled(!busy);
                   pasteBtn.setAlpha(busy ? 0.4f : 1f);
-                  webFrame.setVisibility(busy || previewOpen ? View.VISIBLE : View.GONE);
-                  previewToggle.setText(busy ? "Aktif" : (previewOpen ? "Sembunyikan" : "Tampilkan"));
+                  boolean webBusy = mode == Mode.SCAN || mode == Mode.CAPTURE;
+                  webFrame.setVisibility(webBusy || previewOpen ? View.VISIBLE : View.GONE);
+                  previewToggle.setText(webBusy ? "Aktif" : (previewOpen ? "Sembunyikan" : "Tampilkan"));
                   previewToggle.setAlpha(busy ? 0.5f : 1f);
                   tabVideos.setText(total > 0 ? "Daftar video (" + total + ")" : "Daftar video");
                   syncService();
@@ -1415,6 +1514,7 @@ jobs:
                       case ST_SEARCH: Ui.setChip(this, chip, "Mencari", Ui.AMBER); break;
                       case ST_QUEUED: Ui.setChip(this, chip, "Antre", Ui.AMBER); break;
                       case ST_DL: Ui.setChip(this, chip, vPct[i] >= 0 ? vPct[i] + "%" : "Mengunduh", Ui.AMBER); break;
+                      case ST_READY: Ui.setChip(this, chip, "Link siap", Ui.TEXT); break;
                       case ST_DONE: Ui.setChip(this, chip, "Selesai", Ui.ION); break;
                       case ST_FAIL: Ui.setChip(this, chip, "Gagal", Ui.PULSE); break;
                       default: Ui.setChip(this, chip, "Menunggu", Ui.MUTED);
@@ -1457,8 +1557,80 @@ jobs:
                   web.stopLoading();
                   web.loadUrl("about:blank");
                   getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                  log("\nDihentikan. Video yang sudah antre tetap diunduh.");
-                  setStatus("Dihentikan. Video yang sudah antre tetap diunduh.", Ui.AMBER);
+                  int rd = countState(ST_READY);
+                  log("\nPengumpulan link dihentikan. " + rd + " link sudah terkumpul.");
+                  setStatus("Dihentikan. " + rd + " link sudah terkumpul dan siap diunduh.", Ui.AMBER);
+                  refreshUi();
+              }
+
+              // ---------------- TAHAP 2: UNDUH MASSAL ----------------
+
+              int maxParallel() {
+                  return PAR_VALUES[parSpin.getSelectedItemPosition()];
+              }
+
+              /** Mulai mengunduh semua link yang sudah terkumpul, tanpa membuka halaman web lagi. */
+              void startDownloads() {
+                  dlQueue.clear();
+                  for (int i = 0; i < vState.length; i++) {
+                      if (vState[i] == ST_READY && rUrl != null && i < rUrl.length && rUrl[i] != null) dlQueue.add(i);
+                  }
+                  if (dlQueue.isEmpty()) return;
+                  mode = Mode.DOWNLOAD;
+                  log("\nTahap 2: mengunduh " + dlQueue.size() + " video, maksimal " + maxParallel() + " sekaligus.");
+                  setStatus("Mengunduh " + dlQueue.size() + " video ...", Ui.AMBER);
+                  pump();
+                  startTracker();
+                  refreshUi();
+              }
+
+              /** Isi slot unduhan yang kosong dari antrean. */
+              void pump() {
+                  if (mode != Mode.DOWNLOAD) return;
+                  while (!dlQueue.isEmpty() && dlMap.size() < maxParallel()) beginDownload(dlQueue.poll());
+                  if (dlQueue.isEmpty() && dlMap.isEmpty()) finishDownloads();
+              }
+
+              void beginDownload(int i) {
+                  String name = rName[i];
+                  try {
+                      DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                      DownloadManager.Request r = new DownloadManager.Request(Uri.parse(rUrl[i]));
+                      r.addRequestHeader("User-Agent", web.getSettings().getUserAgentString());
+                      r.addRequestHeader("Referer", rRef[i]);
+                      String cookie = CookieManager.getInstance().getCookie(rUrl[i]);
+                      if (cookie != null) r.addRequestHeader("Cookie", cookie);
+                      r.setTitle(name);
+                      r.setDescription("Filecoster Downloader");
+                      r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                      String sub = targetSub(videos.get(i)[2]);
+                      r.setDestinationInExternalPublicDir(BASE_DIRS[baseSpin.getSelectedItemPosition()],
+                              sub.isEmpty() ? name : sub + "/" + name);
+                      long id = dm.enqueue(r);
+                      dlMap.put(id, i);
+                      setState(i, ST_QUEUED, name);
+                      log("   mulai unduh: " + name);
+                  } catch (Exception e) {
+                      setState(i, ST_FAIL, "gagal memulai unduhan: " + e.getMessage());
+                      log("   x gagal memulai unduhan " + name + ": " + e.getMessage());
+                  }
+              }
+
+              void finishDownloads() {
+                  mode = Mode.IDLE;
+                  int done = countState(ST_DONE), failed = countState(ST_FAIL);
+                  log("\nTahap 2 selesai: " + done + " berhasil, " + failed + " gagal. File ada di " + destLabel() + ".");
+                  setStatus(failed > 0 ? "Selesai: " + done + " berhasil, " + failed + " gagal. Tekan Coba lagi untuk yang gagal."
+                          : "Selesai: " + done + " video terunduh ke " + destLabel() + ".", failed > 0 ? Ui.AMBER : Ui.ION);
+                  refreshUi();
+              }
+
+              void stopDownloads() {
+                  dlQueue.clear();
+                  mode = Mode.IDLE;
+                  int rd = countState(ST_READY);
+                  log("\nAntrean dihentikan. Unduhan yang sedang berjalan tetap diselesaikan.");
+                  setStatus("Antrean dihentikan." + (rd > 0 ? " " + rd + " video belum diunduh." : ""), Ui.AMBER);
                   refreshUi();
               }
 
@@ -1468,10 +1640,11 @@ jobs:
                   @Override
                   public void run() {
                       tracking = false;
-                      if (dlMap.isEmpty()) return;
-                      boolean active = pollDownloads();
+                      if (dlMap.isEmpty() && dlQueue.isEmpty()) return;
+                      if (!dlMap.isEmpty()) pollDownloads();
+                      pump();
                       refreshUi();
-                      if (active || !dlMap.isEmpty()) {
+                      if (!dlMap.isEmpty() || !dlQueue.isEmpty()) {
                           tracking = true;
                           h.postDelayed(this, 1500);
                       }
@@ -1485,6 +1658,7 @@ jobs:
               }
 
               boolean pollDownloads() {
+                  if (dlMap.isEmpty()) return false;
                   DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
                   long[] ids = new long[dlMap.size()];
                   int k = 0;
@@ -1632,6 +1806,7 @@ jobs:
                   vState = new int[0];
                   vPct = new int[0];
                   vNote = new String[0];
+                  rUrl = null;
                   mode = Mode.SCAN;
                   prefs.edit().putString("url", url).apply();
                   buildRows();
@@ -1788,7 +1963,7 @@ jobs:
 
               // ---------------- TANGKAP & UNDUH ----------------
 
-              void startDownloadAll() {
+              void startCollect() {
                   if (videos.isEmpty()) return;
                   if (Build.VERSION.SDK_INT < 29 && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                           != PackageManager.PERMISSION_GRANTED) {
@@ -1802,6 +1977,7 @@ jobs:
                           .putBoolean("ads", adBox.isChecked())
                           .putString("folder", cleanFolder(folderInput.getText().toString())).apply();
                   log("Disimpan ke: " + destLabel());
+                  log("Tahap 1: mengumpulkan link unduhan semua video (belum ada yang diunduh).");
                   mode = Mode.CAPTURE;
                   paused = false;
                   retryIdx = -1;
@@ -1816,7 +1992,7 @@ jobs:
               @Override
               public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
                   if (code != 1) return;
-                  if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startDownloadAll();
+                  if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startCollect();
                   else log("Izin penyimpanan ditolak, tidak bisa mengunduh.");
               }
 
@@ -1833,12 +2009,15 @@ jobs:
                       capSeq++;
                       web.loadUrl("about:blank");
                       getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                      int failedNow = countState(ST_FAIL);
-                      setStatus("Pencarian selesai. Unduhan berjalan di latar belakang"
-                              + (failedNow > 0 ? ", " + failedNow + " gagal." : "."), failedNow > 0 ? Ui.AMBER : Ui.ION);
-                      refreshUi();
-                      log("\nSelesai mencari: " + ok + " masuk antrean unduhan, " + fail + " gagal.\n" +
-                          "Unduhan berjalan di latar belakang (lihat notifikasi). File ada di " + destLabel() + ".");
+                      int rd = countState(ST_READY), failedNow = countState(ST_FAIL);
+                      log("\nTahap 1 selesai: " + rd + " link terkumpul, " + failedNow + " gagal.");
+                      if (rd > 0 && autoBox.isChecked()) {
+                          startDownloads();
+                      } else {
+                          setStatus(rd + " link terkumpul" + (failedNow > 0 ? ", " + failedNow + " gagal" : "")
+                                  + (rd > 0 ? ". Tekan Mulai unduh." : "."), failedNow > 0 ? Ui.AMBER : Ui.ION);
+                          refreshUi();
+                      }
                       return;
                   }
                   String[] v = videos.get(idx);
@@ -1848,6 +2027,10 @@ jobs:
                   captured.clear();
                   cand.clear();
                   lastNewCand = 0;
+                  readyUrls.clear();
+                  earlyDecision = false;
+                  fastOff = false;
+                  pageTitle = null;
                   allowedHosts.clear();
                   jumpedToIframe = false;
                   pollCount = 0;
@@ -1855,6 +2038,15 @@ jobs:
                   final int seq = ++capSeq;
                   log("\n[" + (idx + 1) + "/" + videos.size() + "] " + (v[2].isEmpty() ? "" : v[2] + " / ")
                           + (v[1].isEmpty() ? v[0] : v[1]));
+                  String vpath = Uri.parse(v[0]).getPath();
+                  if (vpath != null && DIRECT.matcher(vpath).find()) {
+                      // link langsung ke file video: tidak perlu membuka halaman atau mencari sumbernya
+                      pageTitle = stripExt(Uri.decode(lastSegment(vpath)));
+                      log("   file video langsung, diunduh tanpa membuka halaman");
+                      Uri vu = Uri.parse(v[0]);
+                      storeLink(v[0], vu.getScheme() + "://" + vu.getHost() + "/");
+                      return;
+                  }
                   web.loadUrl(v[0]);
                   h.postDelayed(() -> poll(seq), 3000);
               }
@@ -1870,7 +2062,7 @@ jobs:
                           JSONArray f = o.optJSONArray("iframes");
                           if (m != null) for (int i = 0; i < m.length(); i++) {
                               JSONArray it = m.optJSONArray(i);
-                              if (it != null) addCandidate(it.optString(0, ""), it.optDouble(1, 0));
+                              if (it != null) addCandidate(it.optString(0, ""), it.optDouble(1, 0), it.optInt(2, 0));
                           }
                           if (f != null) for (int i = 0; i < f.length(); i++) iframes.add(f.getString(i));
                       } catch (Exception ignored) { }
@@ -1879,8 +2071,18 @@ jobs:
                       for (String u : net) addCandidate(u, 0);
                       pollCount++;
                       long now = System.currentTimeMillis();
+                      if (pageTitle == null && !jumpedToIframe) {
+                          String t = web.getTitle();
+                          if (t != null && !t.isEmpty() && !t.startsWith("http") && !t.equals("about:blank")) pageTitle = t;
+                      }
 
-                      if (!cand.isEmpty() && (now - lastNewCand >= SETTLE_MS || now > deadline)) {
+                      boolean fast = !cand.isEmpty() && fastReady();
+                      if (!cand.isEmpty() && (fast || now - lastNewCand >= SETTLE_MS || now > deadline)) {
+                          earlyDecision = fast;
+                          if (fast) {
+                              log("   video siap diputar, langsung diambil");
+                              setState(idx, ST_SEARCH, "Video siap diputar, memulai unduhan");
+                          }
                           decide(seq);
                           return;
                       }
@@ -1968,7 +2170,12 @@ jobs:
               }
 
               void addCandidate(String u, double dur) {
+                  addCandidate(u, dur, 0);
+              }
+
+              void addCandidate(String u, double dur, int ready) {
                   if (u == null || !u.startsWith("http") || SEGMENT.matcher(u).find() || isAd(u)) return;
+                  if (ready >= 3 && dur >= AD_MAX_DURATION) readyUrls.add(u);
                   Double old = cand.get(u);
                   if (old == null) {
                       if (cand.size() >= 20) return;
@@ -2025,7 +2232,13 @@ jobs:
                       if (cs > bs || (cs == bs && d >= durs.get(best))) best = i;
                   }
                   if (best >= 0) {
-                      enqueue(urls.get(best), referer);
+                      storeLink(urls.get(best), referer);
+                  } else if (earlyDecision && System.currentTimeMillis() < deadline) {
+                      earlyDecision = false;
+                      fastOff = true;
+                      log("   kandidat siap putar ternyata bukan video utama, menunggu kandidat lain");
+                      final int again = capSeq;
+                      h.postDelayed(() -> poll(again), 1500);
                   } else if (hls != null) {
                       markFail("video berformat stream (m3u8), belum didukung aplikasi ini");
                       advance();
@@ -2075,33 +2288,27 @@ jobs:
                   return null;
               }
 
-              void enqueue(String media, String referer) {
+              /** Tahap 1: simpan link video yang berhasil ditemukan. Pengunduhan baru dimulai di tahap 2. */
+              void storeLink(String media, String referer) {
                   String[] v = videos.get(idx);
                   if (referer == null) referer = v[0];
-                  String title = v[1].isEmpty() ? (web.getTitle() == null ? "video" : web.getTitle()) : v[1];
-                  String name = String.format("%03d - %s%s", idx + 1, sanitize(title), extOf(media));
-                  try {
-                      DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-                      DownloadManager.Request r = new DownloadManager.Request(Uri.parse(media));
-                      r.addRequestHeader("User-Agent", web.getSettings().getUserAgentString());
-                      r.addRequestHeader("Referer", referer);
-                      String cookie = CookieManager.getInstance().getCookie(media);
-                      if (cookie != null) r.addRequestHeader("Cookie", cookie);
-                      r.setTitle(name);
-                      r.setDescription("Filecoster Downloader");
-                      r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                      String sub = targetSub(v.length > 2 ? v[2] : "");
-                      r.setDestinationInExternalPublicDir(BASE_DIRS[baseSpin.getSelectedItemPosition()],
-                              sub.isEmpty() ? name : sub + "/" + name);
-                      long id = dm.enqueue(r);
-                      dlMap.put(id, idx);
-                      setState(idx, ST_QUEUED, name);
-                      startTracker();
-                      log("   OK masuk antrean: " + name);
-                      ok++;
-                  } catch (Exception e) {
-                      markFail("gagal memulai unduhan: " + e.getMessage());
+                  String title = !v[1].isEmpty() ? v[1]
+                          : (pageTitle != null ? pageTitle : (web.getTitle() == null ? "video" : web.getTitle()));
+                  String prefix = videos.size() > 1 ? String.format("%03d - ", idx + 1) : "";
+                  String name = prefix + sanitize(title) + extOf(media);
+                  int n = videos.size();
+                  if (rUrl == null || rUrl.length != n) {
+                      rUrl = new String[n];
+                      rRef = new String[n];
+                      rName = new String[n];
                   }
+                  rUrl[idx] = media;
+                  rRef[idx] = referer;
+                  rName[idx] = name;
+                  ok++;
+                  log("   link siap: " + name + "\n     " + shorten(media));
+                  setState(idx, ST_READY, name);
+                  refreshUi();
                   advance();
               }
 
@@ -2166,7 +2373,7 @@ jobs:
               protected void onStart() {
                   super.onStart();
                   updateBatteryStatus();
-                  if (!dlMap.isEmpty()) startTracker();
+                  if (!dlMap.isEmpty() || !dlQueue.isEmpty()) startTracker();
                   if (mode == Mode.CAPTURE && paused) {
                       paused = false;
                       retryIdx = -1;
