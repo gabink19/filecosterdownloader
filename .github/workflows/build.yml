@@ -62,8 +62,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 10
-                  versionName '2.3'
+                  versionCode 11
+                  versionName '2.4'
               }
 
               compileOptions {
@@ -693,7 +693,10 @@ jobs:
           import java.io.ByteArrayInputStream;
           import java.net.HttpURLConnection;
           import java.net.URL;
+          import java.text.SimpleDateFormat;
           import java.util.ArrayDeque;
+          import java.util.Date;
+          import java.util.Locale;
           import java.util.ArrayList;
           import java.util.Collections;
           import java.util.HashMap;
@@ -832,6 +835,16 @@ jobs:
               TextView logView;
               WebView web;
 
+              // riwayat link
+              static final int MAX_HISTORY = 50;
+              LinearLayout historyPane, historyBox;
+              TextView tabHistory, clearHistoryBtn;
+              ScrollView mainScroll;
+              String historyUrl = "";
+              boolean clearArmed;
+              int subfolderCount;
+              String scanTitle, scanUrl;
+
               Mode mode = Mode.IDLE;
               String baseDomain = "", folderPath = "";
               Pattern linkPattern;
@@ -873,6 +886,7 @@ jobs:
                   setStatus("Siap. Tempel link folder untuk mulai.", Ui.MUTED);
                   buildRows();
                   showTab(0);
+                  renderHistory();
                   refreshUi();
               }
 
@@ -1066,10 +1080,12 @@ jobs:
                   LinearLayout tabs = Ui.row(this);
                   tabs.setBackground(Ui.box(this, Ui.PANEL, 12, 0));
                   tabs.setPadding(dp(4), dp(4), dp(4), dp(4));
-                  tabVideos = tab("Daftar video");
-                  tabLog = tab("Catatan proses");
+                  tabVideos = tab("Video");
+                  tabLog = tab("Catatan");
+                  tabHistory = tab("Riwayat");
                   tabs.addView(tabVideos, Ui.weight(1));
                   tabs.addView(tabLog, Ui.weight(1));
+                  tabs.addView(tabHistory, Ui.weight(1));
                   root.addView(tabs, Ui.fill(this, 20));
 
                   listBox = Ui.col(this);
@@ -1092,7 +1108,18 @@ jobs:
                   logPane.addView(logView, Ui.fill(this, 8));
                   root.addView(logPane, Ui.fill(this, 8));
 
+                  historyPane = Ui.col(this);
+                  clearHistoryBtn = Ui.ghost(this, "Hapus semua riwayat");
+                  clearHistoryBtn.setTextSize(13);
+                  LinearLayout.LayoutParams chl = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  chl.gravity = Gravity.END;
+                  historyPane.addView(clearHistoryBtn, chl);
+                  historyBox = Ui.col(this);
+                  historyPane.addView(historyBox, Ui.fill(this, 8));
+                  root.addView(historyPane, Ui.fill(this, 8));
+
                   ScrollView scroll = new ScrollView(this);
+                  mainScroll = scroll;
                   scroll.setFillViewport(true);
                   scroll.addView(root);
 
@@ -1134,6 +1161,23 @@ jobs:
                   });
                   tabVideos.setOnClickListener(v -> showTab(0));
                   tabLog.setOnClickListener(v -> showTab(1));
+                  tabHistory.setOnClickListener(v -> showTab(2));
+                  clearHistoryBtn.setOnClickListener(v -> {
+                      if (clearArmed) {
+                          clearArmed = false;
+                          prefs.edit().remove("history").apply();
+                          historyUrl = "";
+                          clearHistoryBtn.setText("Hapus semua riwayat");
+                          renderHistory();
+                      } else {
+                          clearArmed = true;
+                          clearHistoryBtn.setText("Tekan lagi untuk menghapus");
+                          h.postDelayed(() -> {
+                              clearArmed = false;
+                              clearHistoryBtn.setText("Hapus semua riwayat");
+                          }, 3000);
+                      }
+                  });
                   subBox.setOnCheckedChangeListener((bt, on) -> {
                       updateSettingsSummary();
                       saveSettings();
@@ -1204,7 +1248,8 @@ jobs:
               }
 
               TextView tab(String s) {
-                  TextView t = Ui.text(this, s, 14, Ui.MUTED, Ui.MEDIUM);
+                  TextView t = Ui.text(this, s, 13, Ui.MUTED, Ui.MEDIUM);
+                  t.setSingleLine(true);
                   t.setGravity(Gravity.CENTER);
                   t.setPadding(0, dp(10), 0, dp(10));
                   t.setClickable(true);
@@ -1212,12 +1257,15 @@ jobs:
               }
 
               void showTab(int which) {
-                  tabVideos.setBackground(which == 0 ? Ui.box(this, Ui.PANEL_HI, 9, Ui.LINE) : null);
-                  tabLog.setBackground(which == 1 ? Ui.box(this, Ui.PANEL_HI, 9, Ui.LINE) : null);
-                  tabVideos.setTextColor(which == 0 ? Ui.TEXT : Ui.MUTED);
-                  tabLog.setTextColor(which == 1 ? Ui.TEXT : Ui.MUTED);
+                  TextView[] tabs = {tabVideos, tabLog, tabHistory};
+                  for (int i = 0; i < tabs.length; i++) {
+                      tabs[i].setBackground(which == i ? Ui.box(this, Ui.PANEL_HI, 9, Ui.LINE) : null);
+                      tabs[i].setTextColor(which == i ? Ui.TEXT : Ui.MUTED);
+                  }
                   listBox.setVisibility(which == 0 ? View.VISIBLE : View.GONE);
                   logPane.setVisibility(which == 1 ? View.VISIBLE : View.GONE);
+                  historyPane.setVisibility(which == 2 ? View.VISIBLE : View.GONE);
+                  if (which == 2) renderHistory();
               }
 
               void setStatus(String msg, int color) {
@@ -1333,6 +1381,8 @@ jobs:
                   logView.setText("");
                   videos.clear();
                   videos.add(new String[]{url, "", ""});
+                  String ssp = u.getPath() == null ? "" : lastSegment(u.getPath());
+                  recordHistory(url, ssp.isEmpty() ? String.valueOf(u.getHost()) : sanitize(Uri.decode(stripExt(ssp))), 1, 0, true);
                   vState = new int[1];
                   vPct = new int[1];
                   vNote = new String[1];
@@ -1461,7 +1511,7 @@ jobs:
                   webFrame.setVisibility(webBusy || previewOpen ? View.VISIBLE : View.GONE);
                   previewToggle.setText(webBusy ? "Aktif" : (previewOpen ? "Sembunyikan" : "Tampilkan"));
                   previewToggle.setAlpha(busy ? 0.5f : 1f);
-                  tabVideos.setText(total > 0 ? "Daftar video (" + total + ")" : "Daftar video");
+                  tabVideos.setText(total > 0 ? "Video (" + total + ")" : "Video");
                   syncService();
               }
 
@@ -1621,6 +1671,7 @@ jobs:
                   mode = Mode.IDLE;
                   int done = countState(ST_DONE), failed = countState(ST_FAIL);
                   log("\nTahap 2 selesai: " + done + " berhasil, " + failed + " gagal. File ada di " + destLabel() + ".");
+                  updateHistoryResult();
                   setStatus(failed > 0 ? "Selesai: " + done + " berhasil, " + failed + " gagal. Tekan Coba lagi untuk yang gagal."
                           : "Selesai: " + done + " video terunduh ke " + destLabel() + ".", failed > 0 ? Ui.AMBER : Ui.ION);
                   refreshUi();
@@ -1643,6 +1694,7 @@ jobs:
                       tracking = false;
                       if (dlMap.isEmpty() && dlQueue.isEmpty()) return;
                       if (!dlMap.isEmpty()) pollDownloads();
+                      updateHistoryResult();
                       pump();
                       refreshUi();
                       if (!dlMap.isEmpty() || !dlQueue.isEmpty()) {
@@ -1803,6 +1855,10 @@ jobs:
                   allLinks.clear();
                   videos.clear();
                   foldersScanned = 0;
+                  subfolderCount = 0;
+                  scanTitle = null;
+                  scanUrl = url;
+                  historyUrl = "";
                   logView.setText("");
                   vState = new int[0];
                   vPct = new int[0];
@@ -1860,6 +1916,10 @@ jobs:
                   final int depth = Integer.parseInt(curPage[2]);
                   web.evaluateJavascript(JS_LINKS, v -> {
                       if (seq != scanSeq) return;
+                      if (scanTitle == null) {
+                          String wt = web.getTitle();
+                          if (wt != null && !wt.trim().isEmpty() && !wt.startsWith("http") && !wt.equals("about:blank")) scanTitle = wt.trim();
+                      }
                       int newVideos = 0, newFolders = 0;
                       try {
                           JSONArray arr = new JSONArray(v);
@@ -1902,6 +1962,7 @@ jobs:
                       } catch (Exception e) {
                           log("Gagal membaca halaman: " + e.getMessage());
                       }
+                      subfolderCount += newFolders;
                       log("   " + newVideos + " video" + (subBox.isChecked() ? ", " + newFolders + " subfolder" : ""));
                       refreshUi();
                       nextScanPage();
@@ -1950,6 +2011,13 @@ jobs:
                   vState = new int[videos.size()];
                   vPct = new int[videos.size()];
                   vNote = new String[videos.size()];
+                  if (scanUrl != null) {
+                      Uri su = Uri.parse(scanUrl);
+                      String sp = su.getPath() == null ? "" : lastSegment(su.getPath());
+                      String hname = scanTitle != null ? sanitize(scanTitle)
+                              : (sp.isEmpty() ? String.valueOf(su.getHost()) : sanitize(Uri.decode(sp)));
+                      recordHistory(scanUrl, hname, videos.size(), subfolderCount, false);
+                  }
                   buildRows();
                   showTab(0);
                   setStatus(videos.size() + " video siap diunduh.", Ui.ION);
@@ -2388,6 +2456,172 @@ jobs:
                   WindowManager.LayoutParams lp = getWindow().getAttributes();
                   lp.screenBrightness = on ? 0.01f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
                   getWindow().setAttributes(lp);
+              }
+
+              // ---------------- RIWAYAT LINK ----------------
+
+              List<JSONObject> historyList() {
+                  List<JSONObject> out = new ArrayList<>();
+                  try {
+                      JSONArray a = new JSONArray(prefs.getString("history", "[]"));
+                      for (int i = 0; i < a.length(); i++) {
+                          JSONObject o = a.optJSONObject(i);
+                          if (o != null) out.add(o);
+                      }
+                  } catch (Exception ignored) { }
+                  return out;
+              }
+
+              void saveHistoryList(List<JSONObject> list) {
+                  JSONArray a = new JSONArray();
+                  for (JSONObject o : list) a.put(o);
+                  prefs.edit().putString("history", a.toString()).apply();
+              }
+
+              /** Catat satu link ke riwayat (yang terbaru di atas). Link yang sama diganti dengan data terbaru. */
+              void recordHistory(String url, String name, int count, int folders, boolean single) {
+                  try {
+                      List<JSONObject> list = historyList();
+                      for (int i = list.size() - 1; i >= 0; i--) {
+                          if (stripSlash(url).equals(stripSlash(list.get(i).optString("url")))) list.remove(i);
+                      }
+                      JSONObject o = new JSONObject();
+                      o.put("url", url);
+                      o.put("name", name);
+                      o.put("videos", count);
+                      o.put("folders", folders);
+                      o.put("single", single);
+                      o.put("done", 0);
+                      o.put("failed", 0);
+                      o.put("time", System.currentTimeMillis());
+                      list.add(0, o);
+                      while (list.size() > MAX_HISTORY) list.remove(list.size() - 1);
+                      saveHistoryList(list);
+                      historyUrl = url;
+                  } catch (Exception ignored) { }
+                  renderHistory();
+              }
+
+              /** Perbarui jumlah video selesai/gagal pada entri riwayat yang sedang dikerjakan. */
+              void updateHistoryResult() {
+                  if (historyUrl.isEmpty() || prefs == null) return;
+                  int done = countState(ST_DONE), failed = countState(ST_FAIL);
+                  try {
+                      List<JSONObject> list = historyList();
+                      boolean changed = false;
+                      for (JSONObject o : list) {
+                          if (stripSlash(historyUrl).equals(stripSlash(o.optString("url")))) {
+                              if (o.optInt("done") != done || o.optInt("failed") != failed) {
+                                  o.put("done", done);
+                                  o.put("failed", failed);
+                                  changed = true;
+                              }
+                              break;
+                          }
+                      }
+                      if (changed) {
+                          saveHistoryList(list);
+                          if (historyPane != null && historyPane.getVisibility() == View.VISIBLE) renderHistory();
+                      }
+                  } catch (Exception ignored) { }
+              }
+
+              void removeHistory(String url) {
+                  List<JSONObject> list = historyList();
+                  for (int i = list.size() - 1; i >= 0; i--) {
+                      if (url.equals(list.get(i).optString("url"))) list.remove(i);
+                  }
+                  saveHistoryList(list);
+                  renderHistory();
+              }
+
+              TextView smallBtn(String s, int color) {
+                  TextView b = Ui.ghost(this, s);
+                  b.setTextSize(13);
+                  b.setTextColor(color);
+                  b.setPadding(dp(8), dp(9), dp(8), dp(9));
+                  return b;
+              }
+
+              void renderHistory() {
+                  if (historyBox == null) return;
+                  historyBox.removeAllViews();
+                  List<JSONObject> list = historyList();
+                  tabHistory.setText(list.isEmpty() ? "Riwayat" : "Riwayat (" + list.size() + ")");
+                  clearHistoryBtn.setVisibility(list.isEmpty() ? View.GONE : View.VISIBLE);
+                  if (list.isEmpty()) {
+                      TextView e = Ui.hint(this, "Belum ada riwayat. Link yang sudah dipindai atau diunduh akan muncul di sini.");
+                      e.setPadding(dp(4), dp(8), dp(4), dp(8));
+                      historyBox.addView(e);
+                      return;
+                  }
+                  SimpleDateFormat fmt = new SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault());
+                  for (final JSONObject o : list) {
+                      final String url = o.optString("url");
+                      final boolean single = o.optBoolean("single");
+                      LinearLayout card = Ui.col(this);
+                      card.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
+                      card.setPadding(dp(12), dp(11), dp(12), dp(11));
+
+                      TextView name = Ui.text(this, o.optString("name", url), 14, Ui.TEXT, Ui.MEDIUM);
+                      name.setMaxLines(2);
+                      name.setEllipsize(TextUtils.TruncateAt.END);
+                      card.addView(name);
+
+                      TextView link = Ui.hint(this, url);
+                      link.setSingleLine(true);
+                      link.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                      card.addView(link, Ui.fill(this, 2));
+
+                      String meta = single ? "1 file"
+                              : o.optInt("videos") + " video \u00B7 " + o.optInt("folders") + " subfolder";
+                      card.addView(Ui.text(this, meta, 13, Ui.ION, Ui.MEDIUM), Ui.fill(this, 8));
+
+                      int done = o.optInt("done"), failed = o.optInt("failed");
+                      StringBuilder st = new StringBuilder();
+                      if (done > 0 || failed > 0) {
+                          st.append(done).append(" selesai");
+                          if (failed > 0) st.append(", ").append(failed).append(" gagal");
+                          st.append(" \u00B7 ");
+                      }
+                      st.append(fmt.format(new Date(o.optLong("time"))));
+                      card.addView(Ui.hint(this, st.toString()), Ui.fill(this, 2));
+
+                      LinearLayout btns = Ui.row(this);
+                      final TextView use = smallBtn("Pakai link", Ui.ION);
+                      final TextView copy = smallBtn("Salin", Ui.ION);
+                      TextView del = smallBtn("Hapus", Ui.PULSE);
+                      LinearLayout.LayoutParams w1 = Ui.weight(1.4f);
+                      LinearLayout.LayoutParams w2 = Ui.weight(1);
+                      LinearLayout.LayoutParams w3 = Ui.weight(1);
+                      w2.leftMargin = dp(8);
+                      w3.leftMargin = dp(8);
+                      btns.addView(use, w1);
+                      btns.addView(copy, w2);
+                      btns.addView(del, w3);
+                      card.addView(btns, Ui.fill(this, 10));
+
+                      use.setOnClickListener(v -> {
+                          if (mode != Mode.IDLE) {
+                              setStatus("Tunggu proses yang sedang berjalan selesai dulu.", Ui.AMBER);
+                              return;
+                          }
+                          urlInput.setText(url);
+                          mainScroll.smoothScrollTo(0, 0);
+                          setStatus(single ? "Link dipilih dari riwayat. Tekan Unduh langsung."
+                                  : "Link dipilih dari riwayat. Tekan Pindai folder.", Ui.ION);
+                      });
+                      copy.setOnClickListener(v -> {
+                          ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                          if (cm != null) {
+                              cm.setPrimaryClip(ClipData.newPlainText("link", url));
+                              copy.setText("Tersalin");
+                              h.postDelayed(() -> copy.setText("Salin"), 1500);
+                          }
+                      });
+                      del.setOnClickListener(v -> removeHistory(url));
+                      historyBox.addView(card, Ui.fill(this, 6));
+                  }
               }
 
               // ---------------- BANTUAN ----------------
