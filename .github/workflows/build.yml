@@ -1,4 +1,6 @@
 # Filecoster Downloader - build APK otomatis di GitHub.
+# v2.5: pengumpulan link bisa berjalan paralel (beberapa proses sekaligus), jumlahnya disesuaikan
+#       dengan spesifikasi HP (RAM + inti CPU) lengkap dengan rekomendasi.
 # Cukup simpan file ini sebagai .github/workflows/build.yml di repository baru.
 # Setiap kali di-commit, GitHub akan membuat APK dan menaruhnya di halaman Releases.
 
@@ -62,8 +64,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 11
-                  versionName '2.4'
+                  versionCode 12
+                  versionName '2.5'
               }
 
               compileOptions {
@@ -633,6 +635,92 @@ jobs:
           }
           EOF_FILE
 
+          cat > app/src/main/java/com/example/fcdownloader/DeviceProfile.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.app.ActivityManager;
+          import android.content.Context;
+          import android.os.Build;
+
+          import java.util.Locale;
+
+          /**
+           * Membaca spesifikasi HP (RAM, jumlah inti CPU, mode RAM rendah) lalu menghitung
+           * berapa proses sekaligus yang masuk akal. Tiap proses pengumpul link membuka satu
+           * WebView sungguhan, jadi bebannya paling terasa di RAM dan CPU.
+           */
+          final class DeviceProfile {
+              final long ramMb;
+              final int cores, sdk, heapMb;
+              final boolean lowRam;
+              /** Rekomendasi jumlah proses pengumpulan link bersamaan (1 sampai MAX_COLLECT). */
+              final int recCollect;
+              /** Rekomendasi jumlah unduhan bersamaan (beban jaringan saja, jauh lebih ringan). */
+              final int recDownload;
+
+              private DeviceProfile(long ramMb, int cores, int sdk, int heapMb, boolean lowRam) {
+                  this.ramMb = ramMb;
+                  this.cores = cores;
+                  this.sdk = sdk;
+                  this.heapMb = heapMb;
+                  this.lowRam = lowRam;
+                  this.recCollect = pickCollect(ramMb, cores, lowRam, heapMb);
+                  this.recDownload = pickDownload(ramMb, cores, lowRam);
+              }
+
+              static DeviceProfile read(Context c) {
+                  long ram = 0;
+                  boolean low = false;
+                  int heap = 0;
+                  try {
+                      ActivityManager am = (ActivityManager) c.getSystemService(Context.ACTIVITY_SERVICE);
+                      if (am != null) {
+                          ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                          am.getMemoryInfo(mi);
+                          ram = mi.totalMem / (1024L * 1024L);
+                          low = am.isLowRamDevice();
+                          heap = am.getMemoryClass();
+                      }
+                  } catch (Exception ignored) { }
+                  int cores = Math.max(1, Runtime.getRuntime().availableProcessors());
+                  return new DeviceProfile(ram, cores, Build.VERSION.SDK_INT, heap, low);
+              }
+
+              // Catatan: RAM yang dilaporkan Android selalu sedikit di bawah angka di kotak HP
+              // (HP "4 GB" biasanya terbaca sekitar 3,7 GB), jadi batasnya dibuat longgar.
+              private static int pickCollect(long ramMb, int cores, boolean lowRam, int heapMb) {
+                  if (lowRam) return 1;
+                  if (ramMb <= 0) return 2;                          // tidak terbaca: ambil jalan tengah
+                  int byRam = ramMb < 3400 ? 1                       // 3 GB ke bawah
+                          : ramMb < 5000 ? 2                         // 4 sampai 5 GB
+                          : ramMb < 7000 ? 3                         // 6 GB
+                          : 4;                                       // 8 GB ke atas
+                  int byCpu = cores >= 8 ? 4 : cores >= 6 ? 3 : cores >= 4 ? 2 : 1;
+                  int rec = Math.min(byRam, byCpu);
+                  if (heapMb > 0 && heapMb < 100) rec = 1;           // batas memori per aplikasi sangat kecil
+                  return Math.max(1, Math.min(MainActivity.MAX_COLLECT, rec));
+              }
+
+              private static int pickDownload(long ramMb, int cores, boolean lowRam) {
+                  if (lowRam || (ramMb > 0 && ramMb < 3400)) return 2;
+                  int rec = (ramMb > 0 && ramMb < 7000) ? 3 : 5;
+                  if (cores < 4) rec = Math.min(rec, 3);
+                  return rec;
+              }
+
+              String describe() {
+                  String ram = ramMb > 0
+                          ? String.format(Locale.getDefault(), "%.1f GB", ramMb / 1024.0)
+                          : "tidak terbaca";
+                  return "HP ini: RAM " + ram + ", " + cores + " inti CPU, Android " + Build.VERSION.RELEASE
+                          + (lowRam ? ", mode RAM rendah" : "") + ".\n"
+                          + "Rekomendasi: kumpulkan link " + recCollect + " proses sekaligus, unduh " + recDownload
+                          + " sekaligus. Tiap proses pengumpul membuka satu halaman web sungguhan, jadi paling berat "
+                          + "di RAM. Jika memori HP menipis saat bekerja, aplikasi menurunkan jumlah proses sendiri.";
+              }
+          }
+          EOF_FILE
+
           mkdir -p app/src/main/java/com/example/fcdownloader
           cat > app/src/main/java/com/example/fcdownloader/MainActivity.java << 'EOF_FILE'
           package com.example.fcdownloader;
@@ -642,6 +730,7 @@ jobs:
           import android.app.DownloadManager;
           import android.content.ClipData;
           import android.content.ClipboardManager;
+          import android.content.ComponentCallbacks2;
           import android.content.Context;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
@@ -811,19 +900,19 @@ jobs:
               final Map<Long, Integer> dlMap = new HashMap<>();
               boolean tracking;
               CheckBox keepBox, fastBox, autoBox;
-              Spinner parSpin;
+              Spinner parSpin, colSpin;
+              TextView deviceInfo, colHint, recBtn;
+              LinearLayout workerBox;
+              DeviceProfile profile;
+              static final int MAX_COLLECT = 4;
               final ArrayDeque<Integer> dlQueue = new ArrayDeque<>();
               String[] rUrl, rRef, rName;   // link unduhan yang sudah terkumpul (tahap 1)
               TextView singleBtn;
-              String pageTitle;
-              boolean earlyDecision, fastOff;
-              final Set<String> readyUrls = new HashSet<>();
               TextView batteryStatus, batteryBtn;
               String lastNotif = "";
               boolean loadingPrefs = true;
               TextView darkOverlay;
               boolean paused;
-              int stepSeq, retries, retryIdx = -1;
               CheckBox adBox, subBox;
               Spinner saveSpin;
               EditText folderPatternInput;
@@ -831,7 +920,7 @@ jobs:
               EditText folderInput;
               SharedPreferences prefs;
               volatile boolean adBlock = true;
-              final ExecutorService bg = Executors.newSingleThreadExecutor();
+              final ExecutorService bg = Executors.newFixedThreadPool(4);
               TextView logView;
               WebView web;
 
@@ -860,14 +949,11 @@ jobs:
               Pattern folderPattern;
               int scanSeq = 0, foldersScanned = 0;
 
-              // capture
+              // capture: beberapa proses sekaligus, tiap proses punya WebView dan state sendiri
               final List<String[]> videos = new ArrayList<>();
-              final Set<String> captured = Collections.synchronizedSet(new LinkedHashSet<String>());
-              final LinkedHashMap<String, Double> cand = new LinkedHashMap<>();
-              long lastNewCand;
-              int idx, ok, fail, pollCount, capSeq = 0;
-              boolean jumpedToIframe;
-              long deadline;
+              final List<Worker> workers = new ArrayList<>();
+              int nextIdx, capTotal, capLimit, ok, fail;
+              long lastTrimAt;
 
               @Override
               protected void onCreate(Bundle b) {
@@ -892,6 +978,7 @@ jobs:
 
               void buildUi() {
                   prefs = getSharedPreferences("fc", MODE_PRIVATE);
+                  profile = DeviceProfile.read(this);
                   getWindow().setStatusBarColor(Ui.ABYSS);
                   getWindow().setNavigationBarColor(Ui.ABYSS);
                   getWindow().setBackgroundDrawable(new ColorDrawable(Ui.ABYSS));
@@ -998,12 +1085,26 @@ jobs:
                   fastHint.setPadding(dp(32), 0, 0, 0);
                   settingsBody.addView(fastHint);
 
+                  settingsBody.addView(section("Performa HP"), Ui.fill(this, 22));
+                  deviceInfo = Ui.hint(this, profile.describe());
+                  settingsBody.addView(deviceInfo, Ui.fill(this, 6));
+                  settingsBody.addView(label("Pengumpulan link bersamaan"), Ui.fill(this, 12));
+                  colSpin = Ui.spinner(this, colNames());
+                  colSpin.setSelection(Math.max(0, Math.min(MAX_COLLECT, prefs.getInt("col", 0))));
+                  settingsBody.addView(colSpin, Ui.fill(this, 6));
+                  colHint = Ui.hint(this, "");
+                  settingsBody.addView(colHint, Ui.fill(this, 8));
+                  recBtn = Ui.ghost(this, "Pakai rekomendasi untuk HP ini");
+                  recBtn.setTextSize(13);
+                  settingsBody.addView(recBtn, Ui.fill(this, 10));
+
                   settingsBody.addView(section("Unduhan"), Ui.fill(this, 22));
                   autoBox = Ui.check(this, "Mulai unduh otomatis setelah semua link terkumpul", prefs.getBoolean("auto", true));
                   settingsBody.addView(autoBox, Ui.fill(this, 4));
                   settingsBody.addView(label("Unduhan bersamaan"), Ui.fill(this, 10));
-                  parSpin = Ui.spinner(this, PAR_NAMES);
-                  parSpin.setSelection(Math.max(0, Math.min(PAR_NAMES.length - 1, prefs.getInt("par", 1))));
+                  parSpin = Ui.spinner(this, parNames());
+                  parSpin.setSelection(Math.max(0, Math.min(PAR_VALUES.length - 1,
+                          prefs.getInt("par", indexOfPar(profile.recDownload)))));
                   settingsBody.addView(parSpin, Ui.fill(this, 6));
                   settingsBody.addView(Ui.hint(this, "Tahap 1 mengumpulkan semua link dulu, baru tahap 2 mengunduhnya. "
                           + "Angka kecil lebih aman jika server membatasi koneksi."), Ui.fill(this, 8));
@@ -1074,6 +1175,9 @@ jobs:
                   LinearLayout.LayoutParams wl = new LinearLayout.LayoutParams(MATCH, dp(240));
                   wl.topMargin = dp(12);
                   prev.addView(webFrame, wl);
+                  workerBox = Ui.col(this);
+                  workerBox.setVisibility(View.GONE);
+                  prev.addView(workerBox, Ui.fill(this, 8));
                   root.addView(prev, Ui.fill(this, 12));
 
                   // tab daftar video / catatan
@@ -1194,6 +1298,13 @@ jobs:
                       refreshUi();
                   });
                   batteryBtn.setOnClickListener(v -> askIgnoreBattery());
+                  recBtn.setOnClickListener(v -> {
+                      colSpin.setSelection(0);
+                      parSpin.setSelection(indexOfPar(profile.recDownload));
+                      updateSettingsSummary();
+                      saveSettings();
+                      setStatus("Pengaturan disesuaikan dengan rekomendasi untuk HP ini.", Ui.ION);
+                  });
                   TextWatcher saver = new TextWatcher() {
                       public void beforeTextChanged(CharSequence c, int a, int b, int d) { }
                       public void onTextChanged(CharSequence c, int a, int b, int d) { }
@@ -1215,6 +1326,7 @@ jobs:
                   baseSpin.setOnItemSelectedListener(sel);
                   saveSpin.setOnItemSelectedListener(sel);
                   parSpin.setOnItemSelectedListener(sel);
+                  colSpin.setOnItemSelectedListener(sel);
                   folderInput.addTextChangedListener(new TextWatcher() {
                       public void beforeTextChanged(CharSequence c, int a, int b, int d) { }
                       public void onTextChanged(CharSequence c, int a, int b, int d) { }
@@ -1282,7 +1394,53 @@ jobs:
                   String sub = targetSub("Drama");
                   destPreview.setText("Contoh hasil: " + example + (sub.isEmpty() ? "" : "/" + sub) + "/001 - Judul video.mp4");
                   settingsSummary.setText((subBox.isChecked() ? "Termasuk subfolder" : "Hanya folder ini")
-                          + ", simpan ke " + where + (adBox.isChecked() ? ", iklan diblokir." : "."));
+                          + ", simpan ke " + where + (adBox.isChecked() ? ", iklan diblokir" : "")
+                          + ", kumpul " + collectParallel() + " proses.");
+                  if (colSpin != null && colHint != null) {
+                      int n = collectParallel(), rec = profile.recCollect;
+                      if (n > rec) {
+                          colHint.setText("Lebih tinggi dari rekomendasi (" + rec + "). Pengumpulan bisa lebih cepat, tapi HP bisa "
+                                  + "lambat, panas, atau aplikasi tertutup sendiri. Server juga lebih mudah memblokir.");
+                          colHint.setTextColor(Ui.AMBER);
+                      } else if (n < rec) {
+                          colHint.setText("Lebih rendah dari rekomendasi (" + rec + "). Paling aman, tapi lebih lambat.");
+                          colHint.setTextColor(Ui.MUTED);
+                      } else {
+                          colHint.setText("Sesuai rekomendasi untuk HP ini.");
+                          colHint.setTextColor(Ui.ION);
+                      }
+                  }
+              }
+
+              static String parLabel(int v, int rec) {
+                  String t = v == 1 ? "1 (satu per satu)" : v + " sekaligus";
+                  if (v == rec) return t + "  \u2605 rekomendasi";
+                  if (v > rec) return t + "  (berat untuk HP ini)";
+                  return t;
+              }
+
+              String[] colNames() {
+                  String[] n = new String[MAX_COLLECT + 1];
+                  n[0] = "Otomatis (rekomendasi: " + profile.recCollect + " sekaligus)";
+                  for (int k = 1; k <= MAX_COLLECT; k++) n[k] = parLabel(k, profile.recCollect);
+                  return n;
+              }
+
+              String[] parNames() {
+                  String[] n = new String[PAR_VALUES.length];
+                  for (int i = 0; i < n.length; i++) n[i] = parLabel(PAR_VALUES[i], profile.recDownload);
+                  return n;
+              }
+
+              static int indexOfPar(int v) {
+                  for (int i = 0; i < PAR_VALUES.length; i++) if (PAR_VALUES[i] == v) return i;
+                  return 1;
+              }
+
+              /** Jumlah proses pengumpul link yang dipakai (0 pada spinner = otomatis = rekomendasi). */
+              int collectParallel() {
+                  int p = colSpin == null ? 0 : colSpin.getSelectedItemPosition();
+                  return p <= 0 ? profile.recCollect : Math.min(p, MAX_COLLECT);
               }
 
               /** Semua pengaturan disimpan di penyimpanan aplikasi (bukan cache), langsung saat diubah. */
@@ -1301,6 +1459,7 @@ jobs:
                           .putBoolean("fast", fastBox.isChecked())
                           .putBoolean("auto", autoBox.isChecked())
                           .putInt("par", parSpin.getSelectedItemPosition())
+                          .putInt("col", colSpin.getSelectedItemPosition())
                           .apply();
               }
 
@@ -1351,9 +1510,11 @@ jobs:
                       text = "Mengunduh: " + done + " dari " + total + " selesai";
                       pct = total == 0 ? -1 : done * 100 / total;
                   } else {
-                      int cur = Math.min(idx + 1, Math.max(total, 1));
+                      int cur = Math.min(Math.max(nextIdx, 1), Math.max(total, 1));
                       int rd = countState(ST_READY);
-                      text = "Mengumpulkan link " + cur + " dari " + total + ", " + rd + " siap";
+                      int run = runningWorkers();
+                      text = "Mengumpulkan link " + cur + " dari " + total + ", " + rd + " siap"
+                              + (run > 1 ? " (" + run + " proses)" : "");
                       pct = total == 0 ? -1 : rd * 100 / total;
                   }
                   String key = text + "|" + pct;
@@ -1397,13 +1558,6 @@ jobs:
                   return d > 0 ? n.substring(0, d) : n;
               }
 
-              boolean fastReady() {
-                  if (fastOff || !fastBox.isChecked()) return false;
-                  for (String u : readyUrls) {
-                      if (cand.containsKey(u) && !isHls(u)) return true;
-                  }
-                  return false;
-              }
 
               void pasteLink() {
                   ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
@@ -1508,7 +1662,8 @@ jobs:
                   pasteBtn.setEnabled(!busy);
                   pasteBtn.setAlpha(busy ? 0.4f : 1f);
                   boolean webBusy = mode == Mode.SCAN || mode == Mode.CAPTURE;
-                  webFrame.setVisibility(webBusy || previewOpen ? View.VISIBLE : View.GONE);
+                  webFrame.setVisibility(mode == Mode.SCAN || (!busy && previewOpen) ? View.VISIBLE : View.GONE);
+                  workerBox.setVisibility(mode == Mode.CAPTURE ? View.VISIBLE : View.GONE);
                   previewToggle.setText(webBusy ? "Aktif" : (previewOpen ? "Sembunyikan" : "Tampilkan"));
                   previewToggle.setAlpha(busy ? 0.5f : 1f);
                   tabVideos.setText(total > 0 ? "Video (" + total + ")" : "Video");
@@ -1584,12 +1739,6 @@ jobs:
                   paintRow(i);
               }
 
-              void markFail(String reason) {
-                  log("   x " + reason);
-                  fail++;
-                  setState(idx, ST_FAIL, reason);
-                  refreshUi();
-              }
 
               void stopScan() {
                   scanSeq++;
@@ -1602,11 +1751,10 @@ jobs:
               void stopCapture() {
                   mode = Mode.IDLE;
                   paused = false;
-                  capSeq++;
-                  stepSeq++;
-                  if (idx < vState.length && vState[idx] == ST_SEARCH) setState(idx, ST_WAIT, "");
-                  web.stopLoading();
-                  web.loadUrl("about:blank");
+                  for (Worker w : workers) {
+                      if (w.active && w.item >= 0 && w.item < vState.length && vState[w.item] == ST_SEARCH) setState(w.item, ST_WAIT, "");
+                  }
+                  releaseWorkers();
                   getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                   int rd = countState(ST_READY);
                   log("\nPengumpulan link dihentikan. " + rd + " link sudah terkumpul.");
@@ -1806,23 +1954,11 @@ jobs:
                           if (adBlock && !req.isForMainFrame() && isAd(u)) {
                               return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
                           }
-                          noteResource(u);
                           return null;
-                      }
-
-                      @Override
-                      public void onLoadResource(WebView view, String url) {
-                          noteResource(url);
                       }
                   });
               }
 
-              void noteResource(String u) {
-                  if (mode == Mode.CAPTURE && u != null && u.startsWith("http")
-                          && MEDIA.matcher(u).find() && !SEGMENT.matcher(u).find() && !isAd(u)) {
-                      captured.add(u);
-                  }
-              }
 
               // ---------------- PINDAI FOLDER (termasuk subfolder) ----------------
 
@@ -2049,13 +2185,26 @@ jobs:
                   log("Tahap 1: mengumpulkan link unduhan semua video (belum ada yang diunduh).");
                   mode = Mode.CAPTURE;
                   paused = false;
-                  retryIdx = -1;
-                  idx = 0;
+                  nextIdx = 0;
                   ok = 0;
                   fail = 0;
+                  int n = videos.size();
+                  if (rUrl == null || rUrl.length != n) {
+                      rUrl = new String[n];
+                      rRef = new String[n];
+                      rName = new String[n];
+                  }
+                  capTotal = Math.max(1, pendingCount());
+                  int want = Math.max(1, Math.min(collectParallel(), capTotal));
+                  capLimit = want;
+                  lastTrimAt = 0;
+                  releaseWorkers();
+                  for (int k = 0; k < want; k++) workers.add(new Worker(k, want));
+                  log("Proses pengumpul link: " + want + " sekaligus (rekomendasi HP ini: " + profile.recCollect + ").");
                   showTab(0);
                   refreshUi();
-                  nextVideo();
+                  updateCaptureStatus();
+                  for (Worker w : workers) w.scheduleNext(w.slot * 1200L);   // mulai bergantian agar tidak berebut sekaligus
               }
 
               @Override
@@ -2065,152 +2214,465 @@ jobs:
                   else log("Izin penyimpanan ditolak, tidak bisa mengunduh.");
               }
 
-              void nextVideo() {
-                  if (paused || mode != Mode.CAPTURE) return;
-                  while (idx < vState.length && vState[idx] != ST_WAIT && vState[idx] != ST_FAIL
-                          && vState[idx] != ST_SEARCH) idx++;
-                  if (idx != retryIdx) {
-                      retryIdx = idx;
+              // ---------------- TAHAP 1: KUMPULKAN LINK (beberapa proses sekaligus) ----------------
+
+              int runningWorkers() {
+                  int n = 0;
+                  for (Worker w : workers) if (w.active) n++;
+                  return n;
+              }
+
+              /** Ambil video berikutnya yang belum dikerjakan; -1 jika sudah habis. */
+              int claimNext() {
+                  while (nextIdx < vState.length) {
+                      int i = nextIdx++;
+                      if (i < videos.size() && (vState[i] == ST_WAIT || vState[i] == ST_FAIL)) return i;
+                  }
+                  return -1;
+              }
+
+              void updateCaptureStatus() {
+                  int run = runningWorkers();
+                  setStatus("Mengumpulkan link " + Math.min(ok + fail, capTotal) + " dari " + capTotal
+                          + (run > 1 ? " (" + run + " proses sekaligus)" : ""), Ui.AMBER);
+              }
+
+              void finishCapture() {
+                  mode = Mode.IDLE;
+                  releaseWorkersLater();
+                  getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  int rd = countState(ST_READY), failedNow = countState(ST_FAIL);
+                  log("\nTahap 1 selesai: " + rd + " link terkumpul, " + failedNow + " gagal.");
+                  if (rd > 0 && autoBox.isChecked()) {
+                      startDownloads();
+                  } else {
+                      setStatus(rd + " link terkumpul" + (failedNow > 0 ? ", " + failedNow + " gagal" : "")
+                              + (rd > 0 ? ". Tekan Mulai unduh." : "."), failedNow > 0 ? Ui.AMBER : Ui.ION);
+                      refreshUi();
+                  }
+              }
+
+              void releaseWorkers() {
+                  final List<Worker> old = new ArrayList<>(workers);
+                  workers.clear();
+                  for (Worker w : old) w.release();
+              }
+
+              /** Dipakai dari dalam callback WebView: WebView baru dibongkar setelah callback selesai. */
+              void releaseWorkersLater() {
+                  final List<Worker> old = new ArrayList<>(workers);
+                  workers.clear();
+                  h.post(() -> { for (Worker w : old) w.release(); });
+              }
+
+              // Jika Android memberi tanda memori menipis, jumlah proses dikurangi satu per satu.
+              @Override
+              public void onTrimMemory(int level) {
+                  super.onTrimMemory(level);
+                  if (mode != Mode.CAPTURE) return;
+                  if (level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW || level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) return;
+                  long now = SystemClock.uptimeMillis();
+                  if (now - lastTrimAt < 8000) return;
+                  lastTrimAt = now;
+                  if (capLimit > 1) {
+                      capLimit--;
+                      log("\n[memori menipis] proses pengumpul dikurangi menjadi " + capLimit + " sekaligus.");
+                      setStatus("Memori HP menipis, proses dikurangi menjadi " + capLimit + " sekaligus.", Ui.AMBER);
+                  }
+              }
+
+              @Override
+              public void onLowMemory() {
+                  super.onLowMemory();
+                  if (mode == Mode.CAPTURE && capLimit > 1) {
+                      capLimit = 1;
+                      log("\n[memori hampir habis] proses pengumpul diturunkan menjadi 1.");
+                  }
+              }
+
+              /** Satu proses pengumpul link: punya WebView dan state sendiri. */
+              final class Worker {
+                  final int slot;
+                  final WebView wv;
+                  final LinearLayout holder;
+                  final Set<String> captured = Collections.synchronizedSet(new LinkedHashSet<String>());
+                  final LinkedHashMap<String, Double> cand = new LinkedHashMap<>();
+                  final Set<String> readyUrls = new HashSet<>();
+                  final Set<String> allowed = new HashSet<>();
+                  long lastNewCand, deadline;
+                  int item = -1, pollCount, seq, stepSeq, retries;
+                  boolean active, jumpedToIframe, earlyDecision, fastOff;
+                  String pageTitle;
+
+                  Worker(int slot, int total) {
+                      this.slot = slot;
+                      holder = Ui.col(MainActivity.this);
+                      holder.addView(Ui.hint(MainActivity.this, total > 1 ? "Proses " + (slot + 1) + " dari " + total : "Proses pengumpulan"));
+                      wv = new WebView(MainActivity.this);
+                      wv.setBackgroundColor(Color.BLACK);
+                      WebSettings st = wv.getSettings();
+                      st.setJavaScriptEnabled(true);
+                      st.setDomStorageEnabled(true);
+                      st.setMediaPlaybackRequiresUserGesture(false);
+                      st.setSupportMultipleWindows(true);
+                      st.setJavaScriptCanOpenWindowsAutomatically(false);
+                      CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true);
+                      wv.setWebChromeClient(new WebChromeClient() {
+                          @Override
+                          public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message msg) {
+                              return false; // blokir pop-up iklan
+                          }
+                      });
+                      wv.setWebViewClient(new WebViewClient() {
+                          @Override
+                          public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                              if (mode == Mode.IDLE) return false;
+                              return !isAllowed(req.getUrl().toString());
+                          }
+
+                          @Override
+                          public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
+                              if (req.isForMainFrame()) onError(String.valueOf(err.getDescription()));
+                          }
+
+                          @Override
+                          public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                              String u = req.getUrl().toString();
+                              if (adBlock && !req.isForMainFrame() && MainActivity.isAd(u)) {
+                                  return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
+                              }
+                              note(u);
+                              return null;
+                          }
+
+                          @Override
+                          public void onLoadResource(WebView view, String url) {
+                              note(url);
+                          }
+                      });
+                      int hdp = Math.max(130, Math.min(240, 480 / Math.max(1, total)));
+                      LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(hdp));
+                      wlp.topMargin = dp(4);
+                      holder.addView(wv, wlp);
+                      workerBox.addView(holder, Ui.fill(MainActivity.this, 10));
+                  }
+
+                  void release() {
+                      seq++;
+                      stepSeq++;
+                      active = false;
+                      try { wv.stopLoading(); } catch (Exception ignored) { }
+                      workerBox.removeView(holder);
+                      holder.removeAllViews();
+                      try { wv.destroy(); } catch (Exception ignored) { }
+                  }
+
+                  void wl(String s) {
+                      log((workers.size() > 1 && item >= 0 ? "[" + (item + 1) + "] " : "") + s);
+                  }
+
+                  boolean isAllowed(String url) {
+                      String host = Uri.parse(url).getHost();
+                      if (host == null) return true;
+                      return sameSite(host) || allowed.contains(host);
+                  }
+
+                  void note(String u) {
+                      if (mode == Mode.CAPTURE && active && u != null && u.startsWith("http")
+                              && MEDIA.matcher(u).find() && !SEGMENT.matcher(u).find() && !MainActivity.isAd(u)) {
+                          captured.add(u);
+                      }
+                  }
+
+                  void scheduleNext(long delay) {
+                      final int s = ++stepSeq;
+                      h.postDelayed(() -> { if (s == stepSeq && !paused) pickNext(); }, delay);
+                  }
+
+                  void scheduleBegin(long delay) {
+                      final int s = ++stepSeq;
+                      h.postDelayed(() -> { if (s == stepSeq && !paused && active && mode == Mode.CAPTURE) begin(); }, delay);
+                  }
+
+                  /** Proses ini selesai atau tidak dibutuhkan lagi: lepas WebView-nya agar RAM kembali. */
+                  void drop() {
+                      workers.remove(this);
+                      h.post(this::release);
+                  }
+
+                  void pickNext() {
+                      if (paused || mode != Mode.CAPTURE || !workers.contains(this)) return;
+                      active = false;
+                      item = -1;
+                      if (runningWorkers() >= capLimit) {          // jatah proses dikurangi: proses ini berhenti
+                          drop();
+                          return;
+                      }
+                      int i = claimNext();
+                      if (i < 0) {
+                          drop();
+                          if (runningWorkers() == 0) finishCapture();
+                          return;
+                      }
+                      item = i;
+                      active = true;
                       retries = 0;
+                      begin();
                   }
-                  if (idx >= videos.size()) {
-                      mode = Mode.IDLE;
-                      capSeq++;
-                      web.loadUrl("about:blank");
-                      getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                      int rd = countState(ST_READY), failedNow = countState(ST_FAIL);
-                      log("\nTahap 1 selesai: " + rd + " link terkumpul, " + failedNow + " gagal.");
-                      if (rd > 0 && autoBox.isChecked()) {
-                          startDownloads();
-                      } else {
-                          setStatus(rd + " link terkumpul" + (failedNow > 0 ? ", " + failedNow + " gagal" : "")
-                                  + (rd > 0 ? ". Tekan Mulai unduh." : "."), failedNow > 0 ? Ui.AMBER : Ui.ION);
-                          refreshUi();
-                      }
-                      return;
-                  }
-                  String[] v = videos.get(idx);
-                  setState(idx, ST_SEARCH, "Membuka halaman dan menekan play");
-                  setStatus("Video " + (idx + 1) + " dari " + videos.size() + ": mencari sumber video", Ui.AMBER);
-                  refreshUi();
-                  captured.clear();
-                  cand.clear();
-                  lastNewCand = 0;
-                  readyUrls.clear();
-                  earlyDecision = false;
-                  fastOff = false;
-                  pageTitle = null;
-                  allowedHosts.clear();
-                  jumpedToIframe = false;
-                  pollCount = 0;
-                  deadline = System.currentTimeMillis() + CAPTURE_TIMEOUT_MS;
-                  final int seq = ++capSeq;
-                  log("\n[" + (idx + 1) + "/" + videos.size() + "] " + (v[2].isEmpty() ? "" : v[2] + " / ")
-                          + (v[1].isEmpty() ? v[0] : v[1]));
-                  String vpath = Uri.parse(v[0]).getPath();
-                  if (vpath != null && DIRECT.matcher(vpath).find()) {
-                      // link langsung ke file video: tidak perlu membuka halaman atau mencari sumbernya
-                      pageTitle = stripExt(Uri.decode(lastSegment(vpath)));
-                      log("   file video langsung, diunduh tanpa membuka halaman");
-                      Uri vu = Uri.parse(v[0]);
-                      storeLink(v[0], vu.getScheme() + "://" + vu.getHost() + "/");
-                      return;
-                  }
-                  web.loadUrl(v[0]);
-                  h.postDelayed(() -> poll(seq), 3000);
-              }
 
-              void poll(final int seq) {
-                  if (seq != capSeq) return;
-                  web.evaluateJavascript(JS_POLL, v -> {
-                      if (seq != capSeq) return;
-                      List<String> iframes = new ArrayList<>();
-                      try {
-                          JSONObject o = new JSONObject(v);
-                          JSONArray m = o.optJSONArray("media");
-                          JSONArray f = o.optJSONArray("iframes");
-                          if (m != null) for (int i = 0; i < m.length(); i++) {
-                              JSONArray it = m.optJSONArray(i);
-                              if (it != null) addCandidate(it.optString(0, ""), it.optDouble(1, 0), it.optInt(2, 0));
-                          }
-                          if (f != null) for (int i = 0; i < f.length(); i++) iframes.add(f.getString(i));
-                      } catch (Exception ignored) { }
-                      List<String> net;
-                      synchronized (captured) { net = new ArrayList<>(captured); }
-                      for (String u : net) addCandidate(u, 0);
-                      pollCount++;
-                      long now = System.currentTimeMillis();
-                      if (pageTitle == null && !jumpedToIframe) {
-                          String t = web.getTitle();
-                          if (t != null && !t.isEmpty() && !t.startsWith("http") && !t.equals("about:blank")) pageTitle = t;
-                      }
-
-                      boolean fast = !cand.isEmpty() && fastReady();
-                      if (!cand.isEmpty() && (fast || now - lastNewCand >= SETTLE_MS || now > deadline)) {
-                          earlyDecision = fast;
-                          if (fast) {
-                              log("   video siap diputar, langsung diambil");
-                              setState(idx, ST_SEARCH, "Video siap diputar, memulai unduhan");
-                          }
-                          decide(seq);
+                  void begin() {
+                      String[] v = videos.get(item);
+                      setState(item, ST_SEARCH, "Membuka halaman dan menekan play");
+                      captured.clear();
+                      cand.clear();
+                      readyUrls.clear();
+                      allowed.clear();
+                      lastNewCand = 0;
+                      earlyDecision = false;
+                      fastOff = false;
+                      pageTitle = null;
+                      jumpedToIframe = false;
+                      pollCount = 0;
+                      deadline = System.currentTimeMillis() + CAPTURE_TIMEOUT_MS;
+                      final int s = ++seq;
+                      log("\n[" + (item + 1) + "/" + videos.size() + "] " + (v[2].isEmpty() ? "" : v[2] + " / ")
+                              + (v[1].isEmpty() ? v[0] : v[1]));
+                      updateCaptureStatus();
+                      refreshUi();
+                      String vpath = Uri.parse(v[0]).getPath();
+                      if (vpath != null && DIRECT.matcher(vpath).find()) {
+                          // link langsung ke file video: tidak perlu membuka halaman atau mencari sumbernya
+                          pageTitle = stripExt(Uri.decode(lastSegment(vpath)));
+                          wl("   file video langsung, diunduh tanpa membuka halaman");
+                          Uri vu = Uri.parse(v[0]);
+                          storeLink(v[0], vu.getScheme() + "://" + vu.getHost() + "/");
                           return;
                       }
-                      if (now > deadline) {
-                          markFail("sumber video tidak tertangkap");
+                      wv.loadUrl(v[0]);
+                      h.postDelayed(() -> poll(s), 3000);
+                  }
+
+                  void onError(String desc) {
+                      if (mode != Mode.CAPTURE || paused || !active) return;
+                      if (retries < 2) {
+                          retries++;
+                          wl("   halaman gagal dimuat (" + desc + "), mencoba lagi (" + retries + "/2)...");
+                          seq++;
+                          scheduleBegin(4000);
+                      }
+                  }
+
+                  void failItem(String reason) {
+                      wl("   x " + reason);
+                      MainActivity.this.fail++;
+                      setState(item, ST_FAIL, reason);
+                      refreshUi();
+                  }
+
+                  void advance() {
+                      seq++;
+                      active = false;
+                      item = -1;
+                      updateCaptureStatus();
+                      scheduleNext(1500);
+                  }
+
+                  boolean fastReady() {
+                      if (fastOff || !fastBox.isChecked()) return false;
+                      for (String u : readyUrls) {
+                          if (cand.containsKey(u) && !isHls(u)) return true;
+                      }
+                      return false;
+                  }
+
+                  void poll(final int sq) {
+                      if (sq != seq) return;
+                      wv.evaluateJavascript(JS_POLL, v -> {
+                          if (sq != seq) return;
+                          List<String> iframes = new ArrayList<>();
+                          try {
+                              JSONObject o = new JSONObject(v);
+                              JSONArray m = o.optJSONArray("media");
+                              JSONArray f = o.optJSONArray("iframes");
+                              if (m != null) for (int i = 0; i < m.length(); i++) {
+                                  JSONArray it = m.optJSONArray(i);
+                                  if (it != null) addCandidate(it.optString(0, ""), it.optDouble(1, 0), it.optInt(2, 0));
+                              }
+                              if (f != null) for (int i = 0; i < f.length(); i++) iframes.add(f.getString(i));
+                          } catch (Exception ignored) { }
+                          List<String> net;
+                          synchronized (captured) { net = new ArrayList<>(captured); }
+                          for (String u : net) addCandidate(u, 0, 0);
+                          pollCount++;
+                          long now = System.currentTimeMillis();
+                          if (pageTitle == null && !jumpedToIframe) {
+                              String t = wv.getTitle();
+                              if (t != null && !t.isEmpty() && !t.startsWith("http") && !t.equals("about:blank")) pageTitle = t;
+                          }
+
+                          boolean fast = !cand.isEmpty() && fastReady();
+                          if (!cand.isEmpty() && (fast || now - lastNewCand >= SETTLE_MS || now > deadline)) {
+                              earlyDecision = fast;
+                              if (fast) {
+                                  wl("   video siap diputar, langsung diambil");
+                                  setState(item, ST_SEARCH, "Video siap diputar, memulai unduhan");
+                              }
+                              decide(sq);
+                              return;
+                          }
+                          if (now > deadline) {
+                              failItem("sumber video tidak tertangkap");
+                              advance();
+                              return;
+                          }
+                          boolean real = hasRealCandidate();
+                          if (!real && pollCount % 2 == 1 && pollCount <= 30) {
+                              tapPlay(sq);                                 // ketuk tombol play seperti jari sungguhan
+                          } else if (pollCount % 2 == 0 && pollCount <= 30) {
+                              wv.evaluateJavascript(JS_PLAY, null);        // lewati/percepat iklan, pastikan video berputar
+                          }
+                          if (!jumpedToIframe && pollCount >= 6 && !real && !iframes.isEmpty()) {
+                              String target = pickIframe(iframes);
+                              if (target != null) {
+                                  jumpedToIframe = true;
+                                  String host = Uri.parse(target).getHost();
+                                  if (host != null) allowed.add(host);
+                                  Map<String, String> hdr = new HashMap<>();
+                                  String cur = wv.getUrl();
+                                  if (cur != null) hdr.put("Referer", cur);
+                                  wv.loadUrl(target, hdr);
+                              }
+                          }
+                          h.postDelayed(() -> poll(sq), 1500);
+                      });
+                  }
+
+                  void tapPlay(final int sq) {
+                      wv.evaluateJavascript(JS_FIND_PLAY, v -> {
+                          if (sq != seq) return;
+                          try {
+                              JSONArray a = new JSONArray(v);
+                              double cx = a.getDouble(0), cy = a.getDouble(1), iw = a.getDouble(2), ih = a.getDouble(3);
+                              if (iw <= 0 || ih <= 0) return;
+                              float x = (float) (cx * wv.getWidth() / iw);
+                              float y = (float) (cy * wv.getHeight() / ih);
+                              x = Math.max(2, Math.min(wv.getWidth() - 2, x));
+                              y = Math.max(2, Math.min(wv.getHeight() - 2, y));
+                              nativeTap(x, y);
+                          } catch (Exception e) {
+                              nativeTap(wv.getWidth() / 2f, wv.getHeight() / 2f);
+                          }
+                      });
+                  }
+
+                  void nativeTap(final float x, final float y) {
+                      final long t = SystemClock.uptimeMillis();
+                      MotionEvent down = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0);
+                      wv.dispatchTouchEvent(down);
+                      down.recycle();
+                      h.postDelayed(() -> {
+                          MotionEvent up = MotionEvent.obtain(t, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0);
+                          wv.dispatchTouchEvent(up);
+                          up.recycle();
+                      }, 90);
+                  }
+
+                  void addCandidate(String u, double dur, int ready) {
+                      if (u == null || !u.startsWith("http") || SEGMENT.matcher(u).find() || MainActivity.isAd(u)) return;
+                      if (ready >= 3 && dur >= AD_MAX_DURATION) readyUrls.add(u);
+                      Double old = cand.get(u);
+                      if (old == null) {
+                          if (cand.size() >= 20) return;
+                          cand.put(u, dur);
+                          lastNewCand = System.currentTimeMillis();
+                      } else if (dur > 0 && old <= 0) {
+                          cand.put(u, dur);
+                      }
+                  }
+
+                  boolean hasRealCandidate() {
+                      for (Map.Entry<String, Double> e : cand.entrySet()) {
+                          if (isHls(e.getKey())) continue;
+                          double d = e.getValue();
+                          if (d <= 0 || d >= AD_MAX_DURATION) return true;
+                      }
+                      return false;
+                  }
+
+                  void decide(final int sq) {
+                      final List<String> urls = new ArrayList<>(cand.keySet());
+                      final List<Double> durs = new ArrayList<>(cand.values());
+                      final String referer = wv.getUrl();
+                      final String ua = wv.getSettings().getUserAgentString();
+                      final List<String> cookies = new ArrayList<>();
+                      for (String u : urls) cookies.add(CookieManager.getInstance().getCookie(u));
+                      wl("   memeriksa " + urls.size() + " kandidat...");
+                      setState(item, ST_SEARCH, "Memeriksa " + urls.size() + " kandidat video");
+                      bg.execute(() -> {
+                          final long[] sizes = new long[urls.size()];
+                          for (int i = 0; i < urls.size(); i++) {
+                              sizes[i] = isHls(urls.get(i)) ? -1 : probeSize(urls.get(i), referer, ua, cookies.get(i));
+                          }
+                          h.post(() -> { if (sq == seq) choose(urls, durs, sizes, referer); });
+                      });
+                  }
+
+                  void choose(List<String> urls, List<Double> durs, long[] sizes, String referer) {
+                      int best = -1;
+                      String hls = null;
+                      for (int i = 0; i < urls.size(); i++) {
+                          String u = urls.get(i);
+                          double d = durs.get(i);
+                          long sz = sizes[i];
+                          boolean adLike = (d > 0 && d < AD_MAX_DURATION) || (sz >= 0 && sz < AD_MAX_SIZE);
+                          wl("   kandidat: " + fmtSize(sz) + ", " + fmtDur(d) + (adLike ? " [iklan?]" : "") + "\n     " + shorten(u));
+                          if (isHls(u)) {
+                              if (hls == null || u.toLowerCase().contains("master")) hls = u;
+                              continue;
+                          }
+                          if (adLike) continue;
+                          if (best < 0) { best = i; continue; }
+                          long bs = Math.max(sizes[best], 0), cs = Math.max(sz, 0);
+                          if (cs > bs || (cs == bs && d >= durs.get(best))) best = i;
+                      }
+                      if (best >= 0) {
+                          storeLink(urls.get(best), referer);
+                      } else if (earlyDecision && System.currentTimeMillis() < deadline) {
+                          earlyDecision = false;
+                          fastOff = true;
+                          wl("   kandidat siap putar ternyata bukan video utama, menunggu kandidat lain");
+                          final int again = seq;
+                          h.postDelayed(() -> poll(again), 1500);
+                      } else if (hls != null) {
+                          failItem("video berformat stream (m3u8), belum didukung aplikasi ini");
                           advance();
-                          return;
+                      } else {
+                          failItem("hanya iklan yang tertangkap, video asli tidak ditemukan");
+                          advance();
                       }
-                      boolean real = hasRealCandidate();
-                      if (!real && pollCount % 2 == 1 && pollCount <= 30) {
-                          tapPlay(seq);                           // ketuk tombol play seperti jari sungguhan
-                      } else if (pollCount % 2 == 0 && pollCount <= 30) {
-                          web.evaluateJavascript(JS_PLAY, null);  // lewati/percepat iklan, pastikan video berputar
-                      }
-                      if (!jumpedToIframe && pollCount >= 6 && !real && !iframes.isEmpty()) {
-                          String target = pickIframe(iframes);
-                          if (target != null) {
-                              jumpedToIframe = true;
-                              String host = Uri.parse(target).getHost();
-                              if (host != null) allowedHosts.add(host);
-                              Map<String, String> hdr = new HashMap<>();
-                              String cur = web.getUrl();
-                              if (cur != null) hdr.put("Referer", cur);
-                              web.loadUrl(target, hdr);
-                          }
-                      }
-                      h.postDelayed(() -> poll(seq), 1500);
-                  });
+                  }
+
+                  /** Tahap 1: simpan link video yang berhasil ditemukan. Pengunduhan baru dimulai di tahap 2. */
+                  void storeLink(String media, String referer) {
+                      String[] v = videos.get(item);
+                      if (referer == null) referer = v[0];
+                      String title = !v[1].isEmpty() ? v[1]
+                              : (pageTitle != null ? pageTitle : (wv.getTitle() == null ? "video" : wv.getTitle()));
+                      String prefix = videos.size() > 1 ? String.format("%03d - ", item + 1) : "";
+                      String name = prefix + sanitize(title) + extOf(media);
+                      rUrl[item] = media;
+                      rRef[item] = referer;
+                      rName[item] = name;
+                      ok++;
+                      wl("   link siap: " + name + "\n     " + shorten(media));
+                      setState(item, ST_READY, name);
+                      refreshUi();
+                      advance();
+                  }
               }
 
-              void tapPlay(final int seq) {
-                  web.evaluateJavascript(JS_FIND_PLAY, v -> {
-                      if (seq != capSeq) return;
-                      try {
-                          JSONArray a = new JSONArray(v);
-                          double cx = a.getDouble(0), cy = a.getDouble(1), iw = a.getDouble(2), ih = a.getDouble(3);
-                          if (iw <= 0 || ih <= 0) return;
-                          float x = (float) (cx * web.getWidth() / iw);
-                          float y = (float) (cy * web.getHeight() / ih);
-                          x = Math.max(2, Math.min(web.getWidth() - 2, x));
-                          y = Math.max(2, Math.min(web.getHeight() - 2, y));
-                          nativeTap(x, y);
-                      } catch (Exception e) {
-                          nativeTap(web.getWidth() / 2f, web.getHeight() / 2f);
-                      }
-                  });
-              }
 
-              void nativeTap(final float x, final float y) {
-                  final long t = SystemClock.uptimeMillis();
-                  MotionEvent down = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0);
-                  web.dispatchTouchEvent(down);
-                  down.recycle();
-                  h.postDelayed(() -> {
-                      MotionEvent up = MotionEvent.obtain(t, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0);
-                      web.dispatchTouchEvent(up);
-                      up.recycle();
-                  }, 90);
-              }
+
 
               static String cleanFolder(String f) {
                   StringBuilder out = new StringBuilder();
@@ -2238,84 +2700,10 @@ jobs:
                   return saveSpin.getSelectedItemPosition() == 0 ? label + " (beserta subfoldernya)" : label;
               }
 
-              void addCandidate(String u, double dur) {
-                  addCandidate(u, dur, 0);
-              }
 
-              void addCandidate(String u, double dur, int ready) {
-                  if (u == null || !u.startsWith("http") || SEGMENT.matcher(u).find() || isAd(u)) return;
-                  if (ready >= 3 && dur >= AD_MAX_DURATION) readyUrls.add(u);
-                  Double old = cand.get(u);
-                  if (old == null) {
-                      if (cand.size() >= 20) return;
-                      cand.put(u, dur);
-                      lastNewCand = System.currentTimeMillis();
-                  } else if (dur > 0 && old <= 0) {
-                      cand.put(u, dur);
-                  }
-              }
 
-              boolean hasRealCandidate() {
-                  for (Map.Entry<String, Double> e : cand.entrySet()) {
-                      if (isHls(e.getKey())) continue;
-                      double d = e.getValue();
-                      if (d <= 0 || d >= AD_MAX_DURATION) return true;
-                  }
-                  return false;
-              }
 
-              void decide(final int seq) {
-                  final List<String> urls = new ArrayList<>(cand.keySet());
-                  final List<Double> durs = new ArrayList<>(cand.values());
-                  final String referer = web.getUrl();
-                  final String ua = web.getSettings().getUserAgentString();
-                  final List<String> cookies = new ArrayList<>();
-                  for (String u : urls) cookies.add(CookieManager.getInstance().getCookie(u));
-                  log("   memeriksa " + urls.size() + " kandidat...");
-                  setState(idx, ST_SEARCH, "Memeriksa " + urls.size() + " kandidat video");
-                  bg.execute(() -> {
-                      final long[] sizes = new long[urls.size()];
-                      for (int i = 0; i < urls.size(); i++) {
-                          sizes[i] = isHls(urls.get(i)) ? -1 : probeSize(urls.get(i), referer, ua, cookies.get(i));
-                      }
-                      h.post(() -> { if (seq == capSeq) choose(urls, durs, sizes, referer); });
-                  });
-              }
 
-              void choose(List<String> urls, List<Double> durs, long[] sizes, String referer) {
-                  int best = -1;
-                  String hls = null;
-                  for (int i = 0; i < urls.size(); i++) {
-                      String u = urls.get(i);
-                      double d = durs.get(i);
-                      long sz = sizes[i];
-                      boolean adLike = (d > 0 && d < AD_MAX_DURATION) || (sz >= 0 && sz < AD_MAX_SIZE);
-                      log("   kandidat: " + fmtSize(sz) + ", " + fmtDur(d) + (adLike ? " [iklan?]" : "") + "\n     " + shorten(u));
-                      if (isHls(u)) {
-                          if (hls == null || u.toLowerCase().contains("master")) hls = u;
-                          continue;
-                      }
-                      if (adLike) continue;
-                      if (best < 0) { best = i; continue; }
-                      long bs = Math.max(sizes[best], 0), cs = Math.max(sz, 0);
-                      if (cs > bs || (cs == bs && d >= durs.get(best))) best = i;
-                  }
-                  if (best >= 0) {
-                      storeLink(urls.get(best), referer);
-                  } else if (earlyDecision && System.currentTimeMillis() < deadline) {
-                      earlyDecision = false;
-                      fastOff = true;
-                      log("   kandidat siap putar ternyata bukan video utama, menunggu kandidat lain");
-                      final int again = capSeq;
-                      h.postDelayed(() -> poll(again), 1500);
-                  } else if (hls != null) {
-                      markFail("video berformat stream (m3u8), belum didukung aplikasi ini");
-                      advance();
-                  } else {
-                      markFail("hanya iklan yang tertangkap, video asli tidak ditemukan");
-                      advance();
-                  }
-              }
 
               static long probeSize(String url, String referer, String ua, String cookie) {
                   HttpURLConnection c = null;
@@ -2357,53 +2745,13 @@ jobs:
                   return null;
               }
 
-              /** Tahap 1: simpan link video yang berhasil ditemukan. Pengunduhan baru dimulai di tahap 2. */
-              void storeLink(String media, String referer) {
-                  String[] v = videos.get(idx);
-                  if (referer == null) referer = v[0];
-                  String title = !v[1].isEmpty() ? v[1]
-                          : (pageTitle != null ? pageTitle : (web.getTitle() == null ? "video" : web.getTitle()));
-                  String prefix = videos.size() > 1 ? String.format("%03d - ", idx + 1) : "";
-                  String name = prefix + sanitize(title) + extOf(media);
-                  int n = videos.size();
-                  if (rUrl == null || rUrl.length != n) {
-                      rUrl = new String[n];
-                      rRef = new String[n];
-                      rName = new String[n];
-                  }
-                  rUrl[idx] = media;
-                  rRef[idx] = referer;
-                  rName[idx] = name;
-                  ok++;
-                  log("   link siap: " + name + "\n     " + shorten(media));
-                  setState(idx, ST_READY, name);
-                  refreshUi();
-                  advance();
-              }
 
-              void advance() {
-                  idx++;
-                  capSeq++;
-                  scheduleNext(1500);
-              }
 
-              void scheduleNext(long delay) {
-                  final int s = ++stepSeq;
-                  h.postDelayed(() -> { if (s == stepSeq && !paused) nextVideo(); }, delay);
-              }
 
               void onMainFrameError(String desc) {
                   if (mode == Mode.SCAN) {
                       log("Halaman gagal dimuat (" + desc + "). Periksa koneksi, jangan matikan layar, lalu pindai lagi.");
                       setStatus("Halaman gagal dimuat. Periksa koneksi internet.", Ui.PULSE);
-                      return;
-                  }
-                  if (mode != Mode.CAPTURE || paused) return;
-                  if (retries < 2) {
-                      retries++;
-                      log("   halaman gagal dimuat (" + desc + "), mencoba lagi (" + retries + "/2)...");
-                      capSeq++;
-                      scheduleNext(4000);
                   }
               }
 
@@ -2417,6 +2765,7 @@ jobs:
                       // layar mati / aplikasi ditinggal: proses diteruskan, layanan latar depan menjaga CPU & Wi-Fi
                       web.onResume();
                       web.resumeTimers();
+                      for (Worker w : workers) w.wv.onResume();
                       if (mode == Mode.CAPTURE) log("\n[layar mati] proses tetap berjalan di latar belakang.");
                       return;
                   }
@@ -2424,8 +2773,10 @@ jobs:
                   tracking = false;
                   if (mode == Mode.CAPTURE && !paused) {
                       paused = true;
-                      capSeq++;
-                      stepSeq++;
+                      for (Worker w : workers) {
+                          w.seq++;
+                          w.stepSeq++;
+                      }
                       log("\n|| Dijeda: layar mati atau aplikasi ditinggal. Akan dilanjutkan saat aplikasi dibuka lagi.");
                       setStatus("Dijeda karena layar mati. Buka aplikasi untuk melanjutkan.", Ui.AMBER);
                   }
@@ -2435,6 +2786,7 @@ jobs:
               protected void onDestroy() {
                   KeepAliveService.stopHook = null;
                   KeepAliveService.halt(this);
+                  releaseWorkers();
                   super.onDestroy();
               }
 
@@ -2445,9 +2797,11 @@ jobs:
                   if (!dlMap.isEmpty() || !dlQueue.isEmpty()) startTracker();
                   if (mode == Mode.CAPTURE && paused) {
                       paused = false;
-                      retryIdx = -1;
-                      log("> Melanjutkan dari video ke-" + (idx + 1) + "...");
-                      scheduleNext(1500);
+                      log("> Melanjutkan pengumpulan link...");
+                      for (Worker w : new ArrayList<>(workers)) {
+                          if (w.active && w.item >= 0) w.scheduleBegin(1500);
+                          else w.scheduleNext(1500);
+                      }
                   }
               }
 
