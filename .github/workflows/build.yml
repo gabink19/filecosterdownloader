@@ -1,4 +1,6 @@
 # Filecoster Downloader - build APK otomatis di GitHub.
+# v2.6: tanpa notifikasi unduhan sistem, opsi layar web gelap, pilihan 6 proses (dengan peringatan),
+#       layar tidak lagi loncat ke pratinjau web.
 # v2.5: pengumpulan link bisa berjalan paralel (beberapa proses sekaligus), jumlahnya disesuaikan
 #       dengan spesifikasi HP (RAM + inti CPU) lengkap dengan rekomendasi.
 # Cukup simpan file ini sebagai .github/workflows/build.yml di repository baru.
@@ -64,8 +66,8 @@ jobs:
                   applicationId 'com.example.fcdownloader'
                   minSdk 24
                   targetSdk 34
-                  versionCode 12
-                  versionName '2.5'
+                  versionCode 13
+                  versionName '2.6'
               }
 
               compileOptions {
@@ -90,6 +92,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION" />
               <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
               <uses-permission
                   android:name="android.permission.WRITE_EXTERNAL_STORAGE"
@@ -653,7 +656,7 @@ jobs:
               final long ramMb;
               final int cores, sdk, heapMb;
               final boolean lowRam;
-              /** Rekomendasi jumlah proses pengumpulan link bersamaan (1 sampai MAX_COLLECT). */
+              /** Rekomendasi jumlah proses pengumpulan link bersamaan (1 sampai REC_MAX). */
               final int recCollect;
               /** Rekomendasi jumlah unduhan bersamaan (beban jaringan saja, jauh lebih ringan). */
               final int recDownload;
@@ -698,7 +701,7 @@ jobs:
                   int byCpu = cores >= 8 ? 4 : cores >= 6 ? 3 : cores >= 4 ? 2 : 1;
                   int rec = Math.min(byRam, byCpu);
                   if (heapMb > 0 && heapMb < 100) rec = 1;           // batas memori per aplikasi sangat kecil
-                  return Math.max(1, Math.min(MainActivity.MAX_COLLECT, rec));
+                  return Math.max(1, Math.min(MainActivity.REC_MAX, rec));
               }
 
               private static int pickDownload(long ramMb, int cores, boolean lowRam) {
@@ -735,10 +738,12 @@ jobs:
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
           import android.graphics.Color;
+          import android.graphics.Rect;
           import android.graphics.Typeface;
           import android.graphics.drawable.ColorDrawable;
           import android.database.Cursor;
           import android.content.Intent;
+          import android.media.MediaScannerConnection;
           import android.net.Uri;
           import android.os.PowerManager;
           import android.provider.Settings;
@@ -881,6 +886,29 @@ jobs:
 
               enum Mode { IDLE, SCAN, CAPTURE, DOWNLOAD }
 
+              /**
+               * WebView yang tidak merebut fokus dan tidak meminta layar menggulung ke dirinya.
+               * Setiap halaman baru biasanya meminta fokus, dan ScrollView induknya lalu menggulung
+               * ke WebView itu: itulah yang membuat layar "loncat" tiap berganti video.
+               */
+              static class QuietWebView extends WebView {
+                  volatile boolean quiet = true;
+
+                  QuietWebView(Context c) {
+                      super(c);
+                  }
+
+                  @Override
+                  public boolean requestFocus(int direction, Rect previouslyFocusedRect) {
+                      return quiet ? false : super.requestFocus(direction, previouslyFocusedRect);
+                  }
+
+                  @Override
+                  public boolean requestRectangleOnScreen(Rect rectangle, boolean immediate) {
+                      return quiet ? false : super.requestRectangleOnScreen(rectangle, immediate);
+                  }
+              }
+
               final Handler h = new Handler(Looper.getMainLooper());
               EditText urlInput, patternInput;
               TextView mainBtn, secBtn, darkBtn, pasteBtn, copyLogBtn, previewToggle;
@@ -904,7 +932,12 @@ jobs:
               TextView deviceInfo, colHint, recBtn;
               LinearLayout workerBox;
               DeviceProfile profile;
-              static final int MAX_COLLECT = 4;
+              CheckBox darkWebBox;
+              TextView webCover, stageCover;
+              FrameLayout stage;
+              QuietWebView quietMain;
+              static final int MAX_COLLECT = 6;   // batas pilihan di pengaturan (6 diberi peringatan)
+              static final int REC_MAX = 4;       // batas atas untuk angka rekomendasi otomatis
               final ArrayDeque<Integer> dlQueue = new ArrayDeque<>();
               String[] rUrl, rRef, rName;   // link unduhan yang sudah terkumpul (tahap 1)
               TextView singleBtn;
@@ -920,7 +953,7 @@ jobs:
               EditText folderInput;
               SharedPreferences prefs;
               volatile boolean adBlock = true;
-              final ExecutorService bg = Executors.newFixedThreadPool(4);
+              final ExecutorService bg = Executors.newFixedThreadPool(6);
               TextView logView;
               WebView web;
 
@@ -1097,6 +1130,12 @@ jobs:
                   recBtn = Ui.ghost(this, "Pakai rekomendasi untuk HP ini");
                   recBtn.setTextSize(13);
                   settingsBody.addView(recBtn, Ui.fill(this, 10));
+                  darkWebBox = Ui.check(this, "Sembunyikan tampilan web (layar web gelap)", prefs.getBoolean("darkweb", false));
+                  settingsBody.addView(darkWebBox, Ui.fill(this, 14));
+                  TextView darkHint = Ui.hint(this, "Halaman web tetap dibuka, diputar, dan dibaca seperti biasa. Hanya gambarnya "
+                          + "ditutup layar hitam, jadi tidak ada yang perlu dilihat. Matikan jika video sering gagal tertangkap.");
+                  darkHint.setPadding(dp(32), 0, 0, 0);
+                  settingsBody.addView(darkHint);
 
                   settingsBody.addView(section("Unduhan"), Ui.fill(this, 22));
                   autoBox = Ui.check(this, "Mulai unduh otomatis setelah semua link terkumpul", prefs.getBoolean("auto", true));
@@ -1169,15 +1208,22 @@ jobs:
                   webFrame.setBackground(Ui.box(this, Color.BLACK, 10, Ui.LINE));
                   webFrame.setPadding(dp(1), dp(1), dp(1), dp(1));
                   webFrame.setClipToOutline(true);
-                  web = new WebView(this);
+                  quietMain = new QuietWebView(this);
+                  quietMain.quiet = false;
+                  web = quietMain;
                   web.setBackgroundColor(Color.BLACK);
                   webFrame.addView(web, new FrameLayout.LayoutParams(MATCH, MATCH));
+                  webCover = darkCover();
+                  webCover.setVisibility(View.GONE);
+                  webFrame.addView(webCover, new FrameLayout.LayoutParams(MATCH, MATCH));
                   LinearLayout.LayoutParams wl = new LinearLayout.LayoutParams(MATCH, dp(240));
                   wl.topMargin = dp(12);
                   prev.addView(webFrame, wl);
                   workerBox = Ui.col(this);
                   workerBox.setVisibility(View.GONE);
                   prev.addView(workerBox, Ui.fill(this, 8));
+                  stage = new FrameLayout(this);
+                  stageCover = darkCover();
                   root.addView(prev, Ui.fill(this, 12));
 
                   // tab daftar video / catatan
@@ -1222,7 +1268,13 @@ jobs:
                   historyPane.addView(historyBox, Ui.fill(this, 8));
                   root.addView(historyPane, Ui.fill(this, 8));
 
-                  ScrollView scroll = new ScrollView(this);
+                  ScrollView scroll = new ScrollView(this) {
+                      @Override
+                      public void requestChildFocus(View child, View focused) {
+                          if (focused instanceof WebView) return;   // jangan loncat ke pratinjau web
+                          super.requestChildFocus(child, focused);
+                      }
+                  };
                   mainScroll = scroll;
                   scroll.setFillViewport(true);
                   scroll.addView(root);
@@ -1327,6 +1379,11 @@ jobs:
                   saveSpin.setOnItemSelectedListener(sel);
                   parSpin.setOnItemSelectedListener(sel);
                   colSpin.setOnItemSelectedListener(sel);
+                  darkWebBox.setOnCheckedChangeListener((bt, on) -> {
+                      saveSettings();
+                      layoutWorkers();
+                      refreshUi();
+                  });
                   folderInput.addTextChangedListener(new TextWatcher() {
                       public void beforeTextChanged(CharSequence c, int a, int b, int d) { }
                       public void onTextChanged(CharSequence c, int a, int b, int d) { }
@@ -1398,7 +1455,12 @@ jobs:
                           + ", kumpul " + collectParallel() + " proses.");
                   if (colSpin != null && colHint != null) {
                       int n = collectParallel(), rec = profile.recCollect;
-                      if (n > rec) {
+                      if (n >= MAX_COLLECT) {
+                          colHint.setText("\u26A0 " + n + " proses sekaligus sangat berat: tiap proses membuka satu halaman web penuh. "
+                                  + "HP bisa lag, panas, atau aplikasi tertutup sendiri, dan server mudah memblokir. "
+                                  + "Hanya disarankan untuk HP RAM besar (12 GB ke atas). Jumlah proses tetap diturunkan otomatis jika memori menipis.");
+                          colHint.setTextColor(Ui.PULSE);
+                      } else if (n > rec) {
                           colHint.setText("Lebih tinggi dari rekomendasi (" + rec + "). Pengumpulan bisa lebih cepat, tapi HP bisa "
                                   + "lambat, panas, atau aplikasi tertutup sendiri. Server juga lebih mudah memblokir.");
                           colHint.setTextColor(Ui.AMBER);
@@ -1419,11 +1481,63 @@ jobs:
                   return t;
               }
 
+              static String collectLabel(int n, int rec) {
+                  String t = n == 1 ? "1 (satu per satu)" : n + " sekaligus";
+                  if (n >= MAX_COLLECT) return t + "  \u26A0 sangat berat, risiko lag/panas/tertutup";
+                  if (n == rec) return t + "  \u2605 rekomendasi";
+                  if (n > rec) return t + "  \u26A0 berat untuk HP ini";
+                  return t;
+              }
+
               String[] colNames() {
                   String[] n = new String[MAX_COLLECT + 1];
                   n[0] = "Otomatis (rekomendasi: " + profile.recCollect + " sekaligus)";
-                  for (int k = 1; k <= MAX_COLLECT; k++) n[k] = parLabel(k, profile.recCollect);
+                  for (int k = 1; k <= MAX_COLLECT; k++) n[k] = collectLabel(k, profile.recCollect);
                   return n;
+              }
+
+              boolean darkWeb() {
+                  return darkWebBox != null && darkWebBox.isChecked();
+              }
+
+              TextView darkCover() {
+                  TextView t = new TextView(this);
+                  t.setBackgroundColor(Color.BLACK);
+                  t.setTextColor(Color.rgb(70, 78, 110));
+                  t.setGravity(Gravity.CENTER);
+                  t.setText("Tampilan web disembunyikan.\nProses tetap berjalan di belakang.");
+                  t.setClickable(true);       // sentuhan tidak diteruskan ke halaman di bawahnya
+                  return t;
+              }
+
+              static void detach(View v) {
+                  if (v != null && v.getParent() instanceof ViewGroup) ((ViewGroup) v.getParent()).removeView(v);
+              }
+
+              /**
+               * Susun WebView para pekerja. Mode biasa: berderet ke bawah. Mode gelap: semua ditumpuk
+               * dalam satu panel kecil yang ditutup layar hitam. WebView tetap terpasang, berukuran
+               * penuh, dan tergambar di bawah penutup, jadi halaman dan pemutar bekerja seperti biasa.
+               */
+              void layoutWorkers() {
+                  if (workerBox == null) return;
+                  for (Worker w : workers) detach(w.holder);
+                  detach(stageCover);
+                  stage.removeAllViews();
+                  workerBox.removeAllViews();
+                  if (workers.isEmpty()) return;
+                  final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT, WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
+                  if (darkWeb()) {
+                      int maxH = 0;
+                      for (Worker w : workers) {
+                          stage.addView(w.holder, new FrameLayout.LayoutParams(MATCH, WRAP));
+                          maxH = Math.max(maxH, w.hdp);
+                      }
+                      stage.addView(stageCover, new FrameLayout.LayoutParams(MATCH, MATCH));
+                      workerBox.addView(stage, new LinearLayout.LayoutParams(MATCH, dp(maxH + 30)));
+                  } else {
+                      for (Worker w : workers) workerBox.addView(w.holder, Ui.fill(this, 10));
+                  }
               }
 
               String[] parNames() {
@@ -1460,6 +1574,7 @@ jobs:
                           .putBoolean("auto", autoBox.isChecked())
                           .putInt("par", parSpin.getSelectedItemPosition())
                           .putInt("col", colSpin.getSelectedItemPosition())
+                          .putBoolean("darkweb", darkWebBox.isChecked())
                           .apply();
               }
 
@@ -1664,6 +1779,8 @@ jobs:
                   boolean webBusy = mode == Mode.SCAN || mode == Mode.CAPTURE;
                   webFrame.setVisibility(mode == Mode.SCAN || (!busy && previewOpen) ? View.VISIBLE : View.GONE);
                   workerBox.setVisibility(mode == Mode.CAPTURE ? View.VISIBLE : View.GONE);
+                  webCover.setVisibility(darkWeb() && mode == Mode.SCAN ? View.VISIBLE : View.GONE);
+                  quietMain.quiet = busy;     // saat idle pratinjau tetap bisa disentuh/diketik (mis. untuk login)
                   previewToggle.setText(webBusy ? "Aktif" : (previewOpen ? "Sembunyikan" : "Tampilkan"));
                   previewToggle.setAlpha(busy ? 0.5f : 1f);
                   tabVideos.setText(total > 0 ? "Video (" + total + ")" : "Video");
@@ -1801,7 +1918,7 @@ jobs:
                       if (cookie != null) r.addRequestHeader("Cookie", cookie);
                       r.setTitle(name);
                       r.setDescription("Filecoster Downloader");
-                      r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                      r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_HIDDEN);   // kemajuan hanya tampil di dalam aplikasi
                       String sub = targetSub(videos.get(i)[2]);
                       r.setDestinationInExternalPublicDir(BASE_DIRS[baseSpin.getSelectedItemPosition()],
                               sub.isEmpty() ? name : sub + "/" + name);
@@ -1858,6 +1975,17 @@ jobs:
                   h.postDelayed(tracker, 1000);
               }
 
+              /** Tanpa notifikasi unduhan, daftarkan file ke galeri/Files secara manual agar tetap muncul. */
+              void scanDownloaded(String localUri) {
+                  try {
+                      if (localUri == null) return;
+                      Uri u = Uri.parse(localUri);
+                      if ("file".equals(u.getScheme()) && u.getPath() != null) {
+                          MediaScannerConnection.scanFile(this, new String[]{u.getPath()}, null, null);
+                      }
+                  } catch (Exception ignored) { }
+              }
+
               boolean pollDownloads() {
                   if (dlMap.isEmpty()) return false;
                   DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
@@ -1876,6 +2004,7 @@ jobs:
                       int cSo = cur.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR);
                       int cTot = cur.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES);
                       int cRe = cur.getColumnIndex(DownloadManager.COLUMN_REASON);
+                      int cLu = cur.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI);
                       while (cur.moveToNext()) {
                           long id = cur.getLong(cId);
                           Integer i = dlMap.get(id);
@@ -1886,6 +2015,7 @@ jobs:
                           if (stt == DownloadManager.STATUS_SUCCESSFUL) {
                               vPct[i] = 100;
                               setState(i, ST_DONE, tot > 0 ? fmtSize(tot) : "");
+                              scanDownloaded(cLu >= 0 ? cur.getString(cLu) : null);
                               finished.add(id);
                           } else if (stt == DownloadManager.STATUS_FAILED) {
                               setState(i, ST_FAIL, "Unduhan gagal (kode " + cur.getInt(cRe) + ")");
@@ -2200,6 +2330,8 @@ jobs:
                   lastTrimAt = 0;
                   releaseWorkers();
                   for (int k = 0; k < want; k++) workers.add(new Worker(k, want));
+                  layoutWorkers();
+                  if (want >= MAX_COLLECT) log("\u26A0 " + want + " proses sekaligus sangat berat untuk kebanyakan HP. Jika HP lag atau panas, turunkan di Pengaturan.");
                   log("Proses pengumpul link: " + want + " sekaligus (rekomendasi HP ini: " + profile.recCollect + ").");
                   showTab(0);
                   refreshUi();
@@ -2295,6 +2427,7 @@ jobs:
                   final int slot;
                   final WebView wv;
                   final LinearLayout holder;
+                  final int hdp;
                   final Set<String> captured = Collections.synchronizedSet(new LinkedHashSet<String>());
                   final LinkedHashMap<String, Double> cand = new LinkedHashMap<>();
                   final Set<String> readyUrls = new HashSet<>();
@@ -2307,8 +2440,9 @@ jobs:
                   Worker(int slot, int total) {
                       this.slot = slot;
                       holder = Ui.col(MainActivity.this);
+                      holder.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
                       holder.addView(Ui.hint(MainActivity.this, total > 1 ? "Proses " + (slot + 1) + " dari " + total : "Proses pengumpulan"));
-                      wv = new WebView(MainActivity.this);
+                      wv = new QuietWebView(MainActivity.this);
                       wv.setBackgroundColor(Color.BLACK);
                       WebSettings st = wv.getSettings();
                       st.setJavaScriptEnabled(true);
@@ -2350,11 +2484,10 @@ jobs:
                               note(url);
                           }
                       });
-                      int hdp = Math.max(130, Math.min(240, 480 / Math.max(1, total)));
+                      hdp = Math.max(120, Math.min(240, 480 / Math.max(1, total)));
                       LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(hdp));
                       wlp.topMargin = dp(4);
                       holder.addView(wv, wlp);
-                      workerBox.addView(holder, Ui.fill(MainActivity.this, 10));
                   }
 
                   void release() {
@@ -2362,7 +2495,7 @@ jobs:
                       stepSeq++;
                       active = false;
                       try { wv.stopLoading(); } catch (Exception ignored) { }
-                      workerBox.removeView(holder);
+                      detach(holder);
                       holder.removeAllViews();
                       try { wv.destroy(); } catch (Exception ignored) { }
                   }
