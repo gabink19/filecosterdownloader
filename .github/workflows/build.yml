@@ -1,4 +1,6 @@
 # Filecoster Downloader - build APK otomatis di GitHub.
+# v2.9: PIN 6 digit (PIN salah = aplikasi tampil kosong seperti baru dipasang), tab Pemutar hanya berisi
+#       video yang diunduh lewat aplikasi, dengan tampilan Thumbnail atau Daftar.
 # v2.8: pemutar video ala VLC (gestur volume/kecerahan/geser, kunci layar, kecepatan, audio & subtitle),
 #       tab Pemutar (semua video di HP), pembaruan aplikasi langsung dari dalam aplikasi.
 #       Agar pembaruan bisa dipasang, isi Secrets: SIGNING_KEYSTORE_B64, SIGNING_STORE_PASSWORD,
@@ -82,7 +84,7 @@ jobs:
                   minSdk 24
                   targetSdk 34
                   versionCode 1000 + runNumber
-                  versionName "2.8 (build ${runNumber})"
+                  versionName "2.9 (build ${runNumber})"
                   buildConfigField 'int', 'BUILD_NUMBER', "${runNumber}"
                   buildConfigField 'String', 'UPDATE_REPO', "\"${updateRepo}\""
               }
@@ -140,10 +142,6 @@ jobs:
               <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION" />
               <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
               <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-              <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-              <uses-permission
-                  android:name="android.permission.READ_EXTERNAL_STORAGE"
-                  android:maxSdkVersion="32" />
               <uses-permission
                   android:name="android.permission.WRITE_EXTERNAL_STORAGE"
                   android:maxSdkVersion="28" />
@@ -1845,6 +1843,83 @@ jobs:
           }
           EOF_FILE
 
+          cat > app/src/main/java/com/example/fcdownloader/PinLock.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.util.Base64;
+
+          import java.security.MessageDigest;
+          import java.security.SecureRandom;
+
+          import javax.crypto.SecretKeyFactory;
+          import javax.crypto.spec.PBEKeySpec;
+
+          /**
+           * PIN 6 digit untuk membuka aplikasi. PIN tidak disimpan apa adanya: yang disimpan hanya
+           * hash PBKDF2 + salt acak, di penyimpanan privat aplikasi.
+           */
+          final class PinLock {
+
+              static final int LEN = 6;
+              static final int ITERATIONS = 20000;
+              static final String ALGO = "PBKDF2WithHmacSHA1";   // tersedia di semua versi Android yang didukung (minSdk 24)
+
+              private PinLock() { }
+
+              static SharedPreferences store(Context c) {
+                  return c.getSharedPreferences("lock", Context.MODE_PRIVATE);
+              }
+
+              static boolean isSet(Context c) {
+                  return store(c).contains("hash");
+              }
+
+              static boolean valid(String pin) {
+                  return pin != null && pin.length() == LEN && pin.matches("[0-9]{" + LEN + "}");
+              }
+
+              static void set(Context c, String pin) throws Exception {
+                  if (!valid(pin)) throw new IllegalArgumentException("PIN harus " + LEN + " digit angka");
+                  byte[] salt = new byte[16];
+                  new SecureRandom().nextBytes(salt);
+                  byte[] hash = derive(pin, salt);
+                  store(c).edit()
+                          .putString("salt", Base64.encodeToString(salt, Base64.NO_WRAP))
+                          .putString("hash", Base64.encodeToString(hash, Base64.NO_WRAP))
+                          .apply();
+              }
+
+              static boolean check(Context c, String pin) {
+                  if (!valid(pin)) return false;
+                  try {
+                      SharedPreferences p = store(c);
+                      String s = p.getString("salt", null), hs = p.getString("hash", null);
+                      if (s == null || hs == null) return false;
+                      byte[] want = Base64.decode(hs, Base64.NO_WRAP);
+                      byte[] got = derive(pin, Base64.decode(s, Base64.NO_WRAP));
+                      return MessageDigest.isEqual(want, got);     // perbandingan waktu-konstan
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              static void clear(Context c) {
+                  store(c).edit().remove("salt").remove("hash").apply();
+              }
+
+              static byte[] derive(String pin, byte[] salt) throws Exception {
+                  PBEKeySpec spec = new PBEKeySpec(pin.toCharArray(), salt, ITERATIONS, 256);
+                  try {
+                      return SecretKeyFactory.getInstance(ALGO).generateSecret(spec).getEncoded();
+                  } finally {
+                      spec.clearPassword();
+                  }
+              }
+          }
+          EOF_FILE
+
           cat > app/src/main/java/com/example/fcdownloader/HlsDownloader.java << 'EOF_FILE'
           package com.example.fcdownloader;
 
@@ -2285,6 +2360,7 @@ jobs:
           import android.graphics.drawable.ColorDrawable;
           import android.database.Cursor;
           import android.content.Intent;
+          import android.media.MediaMetadataRetriever;
           import android.media.MediaScannerConnection;
           import android.net.Uri;
           import android.os.PowerManager;
@@ -2299,6 +2375,7 @@ jobs:
           import android.os.SystemClock;
           import android.text.Editable;
           import android.text.InputType;
+          import android.util.LruCache;
           import android.text.TextUtils;
           import android.text.TextWatcher;
           import android.view.Gravity;
@@ -2326,6 +2403,8 @@ jobs:
           import android.widget.ScrollView;
           import android.widget.Spinner;
           import android.widget.TextView;
+          import android.app.AlertDialog;
+          import android.content.res.AssetFileDescriptor;
 
           import org.json.JSONArray;
           import org.json.JSONObject;
@@ -2557,11 +2636,31 @@ jobs:
               // pemutar: file hasil unduhan yang sudah selesai (indeks video -> uri) + daftar video di HP
               final Map<Integer, String> doneUri = new HashMap<>();
               static final int MAX_LIBRARY = 150;
-              static final int REQ_LIBRARY = 4, REQ_OPEN_FILE = 5;
+              static final int REQ_OPEN_FILE = 5;
+              static final int MAX_DOWNLOADS = 500;
               LinearLayout libraryPane, libBox;
-              TextView tabPlayer, libReloadBtn, libOpenBtn;
-              final List<String[]> libItems = new ArrayList<>();   // {uri, nama, info, id}
+              TextView tabPlayer, libViewBtn, libOpenBtn;
+              final List<String[]> libItems = new ArrayList<>();   // {uri, nama, info}
               int libSeq;
+              boolean libGrid = true;
+              final LruCache<String, Bitmap> thumbs = new LruCache<String, Bitmap>(16 * 1024 * 1024) {
+                  @Override
+                  protected int sizeOf(String k, Bitmap b) {
+                      return b.getByteCount();
+                  }
+              };
+
+              // kunci PIN. decoy = PIN salah: aplikasi tampil seperti baru dipasang (riwayat & daftar video terpisah)
+              static final int PIN_UNLOCK = 0, PIN_NEW = 1, PIN_CONFIRM = 2, PIN_OLD_CHANGE = 3, PIN_OLD_REMOVE = 4;
+              static final long RELOCK_AFTER_MS = 2 * 60 * 1000;
+              FrameLayout lockLayer;
+              TextView lockTitle, lockHint, lockDots, lockSkip, pinInfo, pinSetBtn, pinOffBtn;
+              final StringBuilder pinBuf = new StringBuilder();
+              int pinStage;
+              String pinFirst;
+              boolean decoy, locked;
+              long stoppedAt;
+              Intent pendingShare;
 
               // pembaruan aplikasi
               static final long UPDATE_CHECK_EVERY_MS = 12L * 60 * 60 * 1000;
@@ -2591,6 +2690,12 @@ jobs:
                   showTab(0);
                   renderHistory();
                   refreshUi();
+                  if (PinLock.isSet(this)) {
+                      showLock(PIN_UNLOCK);
+                  } else if (!prefs.getBoolean("pinAsked", false)) {
+                      showLock(PIN_NEW);          // tawarkan membuat PIN pada pembukaan pertama (bisa dilewati)
+                  }
+                  updatePinUi();
                   if (b == null) handleShare(getIntent());
                   UpdateReceiver.listener = (okInstall, msg) -> h.post(() -> {
                       setStatus(msg, okInstall ? Ui.ION : Ui.PULSE);
@@ -2613,6 +2718,10 @@ jobs:
               /** Link yang dibagikan dari aplikasi lain (Chrome, YouTube, dsb.) langsung dibuka dan dideteksi videonya. */
               void handleShare(Intent it) {
                   if (it == null || !Intent.ACTION_SEND.equals(it.getAction())) return;
+                  if (locked) {                       // diproses setelah PIN dimasukkan, agar masuk ke riwayat yang benar
+                      pendingShare = it;
+                      return;
+                  }
                   CharSequence t = it.getCharSequenceExtra(Intent.EXTRA_TEXT);
                   Matcher m = t == null ? null : URL_IN_TEXT.matcher(t);
                   if (m == null || !m.find()) {
@@ -2694,7 +2803,8 @@ jobs:
                   LinearLayout lrow = Ui.row(this);
                   urlInput = Ui.input(this, "https://filecoster.com/...");
                   urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-                  urlInput.setText(prefs.getString("url", ""));
+                  // jika PIN aktif, link terakhir baru diisi setelah PIN dimasukkan (lihat applyProfile)
+                  urlInput.setText(PinLock.isSet(this) ? "" : prefs.getString("url", ""));
                   lrow.addView(urlInput, Ui.weight(1));
                   pasteBtn = Ui.ghost(this, "Tempel");
                   LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(WRAP, WRAP);
@@ -2809,6 +2919,21 @@ jobs:
                   settingsBody.addView(saveSpin, Ui.fill(this, 6));
                   destPreview = Ui.hint(this, "");
                   settingsBody.addView(destPreview, Ui.fill(this, 8));
+
+                  settingsBody.addView(section("Kunci PIN"), Ui.fill(this, 20));
+                  pinInfo = Ui.hint(this, "");
+                  settingsBody.addView(pinInfo, Ui.fill(this, 6));
+                  LinearLayout pinRow = Ui.row(this);
+                  pinSetBtn = Ui.ghost(this, "Atur PIN");
+                  pinSetBtn.setTextSize(13);
+                  pinRow.addView(pinSetBtn, Ui.weight(1));
+                  pinOffBtn = Ui.ghost(this, "Matikan PIN");
+                  pinOffBtn.setTextSize(13);
+                  pinOffBtn.setTextColor(Ui.PULSE);
+                  LinearLayout.LayoutParams pol = Ui.weight(1);
+                  pol.leftMargin = dp(8);
+                  pinRow.addView(pinOffBtn, pol);
+                  settingsBody.addView(pinRow, Ui.fill(this, 8));
 
                   settingsBody.addView(section("Pembaruan aplikasi"), Ui.fill(this, 20));
                   versionInfo = Ui.hint(this, "Versi terpasang: " + BuildConfig.VERSION_NAME);
@@ -2934,14 +3059,15 @@ jobs:
 
                   libraryPane = Ui.col(this);
                   LinearLayout lbtn = Ui.row(this);
-                  libOpenBtn = Ui.ghost(this, "Buka file video ...");
+                  libGrid = prefs.getInt("libView", 0) == 0;
+                  libViewBtn = Ui.ghost(this, "");
+                  libViewBtn.setTextSize(13);
+                  lbtn.addView(libViewBtn, Ui.weight(1));
+                  libOpenBtn = Ui.ghost(this, "Buka file lain ...");
                   libOpenBtn.setTextSize(13);
-                  lbtn.addView(libOpenBtn, Ui.weight(1));
-                  libReloadBtn = Ui.ghost(this, "Muat ulang");
-                  libReloadBtn.setTextSize(13);
-                  LinearLayout.LayoutParams lrl = Ui.weight(0.7f);
+                  LinearLayout.LayoutParams lrl = Ui.weight(1);
                   lrl.leftMargin = dp(8);
-                  lbtn.addView(libReloadBtn, lrl);
+                  lbtn.addView(libOpenBtn, lrl);
                   libraryPane.addView(lbtn);
                   libBox = Ui.col(this);
                   libraryPane.addView(libBox, Ui.fill(this, 8));
@@ -2972,6 +3098,8 @@ jobs:
                   frame.setFitsSystemWindows(true);
                   frame.addView(scroll);
                   frame.addView(darkOverlay, new FrameLayout.LayoutParams(MATCH, MATCH));
+                  lockLayer = buildLockLayer();
+                  frame.addView(lockLayer, new FrameLayout.LayoutParams(MATCH, MATCH));
                   setContentView(frame);
 
                   // aksi
@@ -3000,15 +3128,21 @@ jobs:
                   tabLog.setOnClickListener(v -> showTab(1));
                   tabHistory.setOnClickListener(v -> showTab(2));
                   tabPlayer.setOnClickListener(v -> showTab(3));
-                  libReloadBtn.setOnClickListener(v -> loadLibrary());
+                  libViewBtn.setOnClickListener(v -> {
+                      libGrid = !libGrid;
+                      prefs.edit().putInt("libView", libGrid ? 0 : 1).apply();
+                      renderLibrary(null);
+                  });
                   libOpenBtn.setOnClickListener(v -> openVideoFile());
+                  pinSetBtn.setOnClickListener(v -> showLock(PinLock.isSet(this) ? PIN_OLD_CHANGE : PIN_NEW));
+                  pinOffBtn.setOnClickListener(v -> showLock(PIN_OLD_REMOVE));
                   updateBtn.setOnClickListener(v -> startUpdate());
                   updateCheckBtn.setOnClickListener(v -> checkUpdate(true));
                   autoUpdateBox.setOnCheckedChangeListener((bt, on) -> saveSettings());
                   clearHistoryBtn.setOnClickListener(v -> {
                       if (clearArmed) {
                           clearArmed = false;
-                          prefs.edit().remove("history").apply();
+                          prefs.edit().remove(key("history")).apply();
                           historyUrl = "";
                           clearHistoryBtn.setText("Hapus semua riwayat");
                           renderHistory();
@@ -3250,7 +3384,7 @@ jobs:
               void saveSettings() {
                   if (loadingPrefs || prefs == null) return;
                   prefs.edit()
-                          .putString("url", urlInput.getText().toString().trim())
+                          .putString(key("url"), urlInput.getText().toString().trim())
                           .putString("pat", patternInput.getText().toString())
                           .putString("fpat", folderPatternInput.getText().toString())
                           .putInt("base", baseSpin.getSelectedItemPosition())
@@ -3684,7 +3818,10 @@ jobs:
                           hlsJobs.remove(i);
                           if (fr != null) {
                               if (i < vPct.length) vPct[i] = 100;
-                              if (fr.uri != null) doneUri.put(i, fr.uri);
+                              if (fr.uri != null) {
+                                  doneUri.put(i, fr.uri);
+                                  recordDownload(fr.uri, fr.location == null ? name : lastSegment(fr.location), fr.bytes);
+                              }
                               setState(i, ST_DONE, fmtSize(fr.bytes));
                               log("   selesai: " + fr.location);
                           } else {
@@ -3782,7 +3919,10 @@ jobs:
                               vPct[i] = 100;
                               try {
                                   Uri fu = dm.getUriForDownloadedFile(id);
-                                  if (fu != null) doneUri.put(i, fu.toString());
+                                  if (fu != null) {
+                                      doneUri.put(i, fu.toString());
+                                      recordDownload(fu.toString(), rName != null && i < rName.length ? rName[i] : null, tot);
+                                  }
                               } catch (Exception ignored) { }
                               setState(i, ST_DONE, tot > 0 ? fmtSize(tot) : "");
                               scanDownloaded(cLu >= 0 ? cur.getString(cLu) : null);
@@ -3894,7 +4034,7 @@ jobs:
                       setStatus("Link belum benar. Tempel link halaman yang berisi video.", Ui.PULSE);
                       return;
                   }
-                  prefs.edit().putString("url", url).apply();
+                  prefs.edit().putString(key("url"), url).apply();
                   sniffing = true;
                   sniffPage = url;
                   sniffed.clear();
@@ -4127,7 +4267,7 @@ jobs:
                   sniffSeq++;
                   sniffed.clear();
                   mode = Mode.SCAN;
-                  prefs.edit().putString("url", url).apply();
+                  prefs.edit().putString(key("url"), url).apply();
                   buildRows();
                   refreshUi();
                   seenPages.add(stripSlash(url));
@@ -4337,11 +4477,6 @@ jobs:
 
               @Override
               public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
-                  if (code == REQ_LIBRARY) {
-                      if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) loadLibrary();
-                      else renderLibrary("Akses video ditolak. Kamu tetap bisa memutar lewat tombol Buka file video.");
-                      return;
-                  }
                   if (code != 1) return;
                   if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startCollect();
                   else log("Izin penyimpanan ditolak, tidak bisa mengunduh.");
@@ -4895,6 +5030,7 @@ jobs:
               @Override
               protected void onStop() {
                   super.onStop();
+                  stoppedAt = SystemClock.elapsedRealtime();
                   boolean keep = mode != Mode.IDLE && keepBox.isChecked() && KeepAliveService.running;
                   if (keep) {
                       // layar mati / aplikasi ditinggal: proses diteruskan, layanan latar depan menjaga CPU & Wi-Fi
@@ -4937,6 +5073,12 @@ jobs:
               protected void onStart() {
                   super.onStart();
                   updateBatteryStatus();
+                  // Kunci lagi jika aplikasi ditinggal lebih dari 2 menit. Tidak dikunci selama ada proses
+                  // berjalan (pindai/kumpul/unduh) agar pekerjaan tidak terganggu.
+                  if (PinLock.isSet(this) && !locked && mode == Mode.IDLE && stoppedAt > 0
+                          && SystemClock.elapsedRealtime() - stoppedAt > RELOCK_AFTER_MS) {
+                      showLock(PIN_UNLOCK);
+                  }
                   if (!dlMap.isEmpty() || !dlQueue.isEmpty() || !hlsJobs.isEmpty()) startTracker();
                   if (mode == Mode.CAPTURE && paused) {
                       paused = false;
@@ -4976,102 +5118,472 @@ jobs:
                   PlayerActivity.open(this, uris, names, start, null, null);
               }
 
-              /** Muat semua video di HP (seperti pustaka VLC), terbaru di atas. */
+              // ---------------- DAFTAR UNDUHAN (isi tab Pemutar) ----------------
+
+              /** Kunci penyimpanan per profil: profil kosong (PIN salah) memakai data terpisah. */
+              String key(String k) {
+                  return decoy ? "d_" + k : k;
+              }
+
+              /** Catat file yang selesai diunduh agar muncul di tab Pemutar (terbaru di atas). */
+              void recordDownload(String uri, String name, long size) {
+                  try {
+                      JSONArray old = new JSONArray(prefs.getString(key("downloads"), "[]"));
+                      JSONArray out = new JSONArray();
+                      JSONObject o = new JSONObject();
+                      o.put("uri", uri);
+                      o.put("name", name == null || name.isEmpty() ? "Video" : name);
+                      o.put("size", size);
+                      o.put("time", System.currentTimeMillis());
+                      out.put(o);
+                      for (int k = 0; k < old.length() && out.length() < MAX_DOWNLOADS; k++) {
+                          JSONObject e = old.optJSONObject(k);
+                          if (e != null && !uri.equals(e.optString("uri"))) out.put(e);
+                      }
+                      prefs.edit().putString(key("downloads"), out.toString()).apply();
+                  } catch (Exception ignored) { }
+                  if (libraryPane != null && libraryPane.getVisibility() == View.VISIBLE) loadLibrary();
+              }
+
+              /** Muat daftar video yang pernah diunduh lewat aplikasi; file yang sudah dihapus dibuang dari daftar. */
               void loadLibrary() {
-                  String perm = Build.VERSION.SDK_INT >= 33 ? "android.permission.READ_MEDIA_VIDEO"
-                          : Manifest.permission.READ_EXTERNAL_STORAGE;
-                  if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
-                      renderLibrary("Izinkan akses video agar daftar video di HP bisa ditampilkan.");
-                      requestPermissions(new String[]{perm}, REQ_LIBRARY);
-                      return;
-                  }
-                  renderLibrary("Memuat daftar video ...");
                   final int s = ++libSeq;
+                  final String dkey = key("downloads");
+                  final String json = prefs.getString(dkey, "[]");
                   final ContentResolver cr = getContentResolver();
+                  final SimpleDateFormat fmt = new SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault());
+                  if (libItems.isEmpty()) renderLibrary("Memuat daftar video ...");
                   bg.execute(() -> {
-                      final List<String[]> out = queryVideos(cr);
+                      final List<String[]> out = new ArrayList<>();
+                      final Set<String> missing = new HashSet<>();
+                      try {
+                          JSONArray a = new JSONArray(json);
+                          for (int k = 0; k < a.length(); k++) {
+                              JSONObject o = a.optJSONObject(k);
+                              if (o == null) continue;
+                              String uri = o.optString("uri", "");
+                              if (uri.isEmpty() || !fileExists(cr, uri)) {
+                                  missing.add(uri);
+                                  continue;
+                              }
+                              long size = o.optLong("size", -1);
+                              String info = (size > 0 ? fmtSize(size) + " \u00B7 " : "") + fmt.format(new Date(o.optLong("time")));
+                              out.add(new String[]{uri, o.optString("name", "Video"), info});
+                          }
+                      } catch (Exception ignored) { }
                       h.post(() -> {
                           if (s != libSeq) return;
                           libItems.clear();
                           libItems.addAll(out);
+                          if (!missing.isEmpty()) removeDownloads(dkey, missing);
                           renderLibrary(null);
                       });
                   });
               }
 
-              static List<String[]> queryVideos(ContentResolver cr) {
-                  List<String[]> out = new ArrayList<>();
-                  Uri coll = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
-                  String[] proj = {MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.DURATION,
-                          MediaStore.Video.Media.SIZE, MediaStore.Video.Media.BUCKET_DISPLAY_NAME};
-                  try (Cursor c = cr.query(coll, proj, null, null, MediaStore.Video.Media.DATE_ADDED + " DESC")) {
-                      if (c == null) return out;
-                      while (c.moveToNext() && out.size() < MAX_LIBRARY) {
-                          long id = c.getLong(0);
-                          String name = c.isNull(1) ? "video" : c.getString(1);
-                          long dur = c.isNull(2) ? 0 : c.getLong(2);
-                          long size = c.isNull(3) ? -1 : c.getLong(3);
-                          String folder = c.isNull(4) ? "" : c.getString(4);
-                          String info = (dur > 0 ? PlayerActivity.fmt(dur) + " \u00B7 " : "") + fmtSize(size)
-                                  + (folder.isEmpty() ? "" : " \u00B7 " + folder);
-                          out.add(new String[]{ContentUris.withAppendedId(coll, id).toString(), name, info, String.valueOf(id)});
+              static boolean fileExists(ContentResolver cr, String uri) {
+                  Uri u = Uri.parse(uri);
+                  if ("file".equals(u.getScheme())) return u.getPath() != null && new File(u.getPath()).exists();
+                  try (AssetFileDescriptor fd = cr.openAssetFileDescriptor(u, "r")) {
+                      return fd != null;
+                  } catch (java.io.FileNotFoundException | SecurityException e) {
+                      return false;          // file dihapus / tidak bisa diakses lagi
+                  } catch (Exception e) {
+                      return true;           // gangguan sementara: jangan dibuang dari daftar
+                  }
+              }
+
+              void removeDownloads(String dkey, Set<String> uris) {
+                  try {
+                      JSONArray old = new JSONArray(prefs.getString(dkey, "[]"));
+                      JSONArray out = new JSONArray();
+                      for (int k = 0; k < old.length(); k++) {
+                          JSONObject e = old.optJSONObject(k);
+                          if (e != null && !uris.contains(e.optString("uri"))) out.put(e);
                       }
+                      prefs.edit().putString(dkey, out.toString()).apply();
                   } catch (Exception ignored) { }
-                  return out;
               }
 
               void renderLibrary(String msg) {
                   if (libBox == null) return;
                   libBox.removeAllViews();
+                  libViewBtn.setText(libGrid ? "Tampilan: Thumbnail" : "Tampilan: Daftar");
                   tabPlayer.setText(msg == null && !libItems.isEmpty() ? "Pemutar (" + libItems.size() + ")" : "Pemutar");
                   if (msg != null || libItems.isEmpty()) {
-                      TextView e = Ui.hint(this, msg != null ? msg : "Belum ada video di HP. Video yang kamu unduh akan muncul di sini.");
+                      TextView e = Ui.hint(this, msg != null ? msg
+                              : "Belum ada video yang diunduh. Video yang selesai diunduh lewat aplikasi ini akan muncul di sini.");
                       e.setPadding(dp(4), dp(8), dp(4), dp(8));
                       libBox.addView(e);
                       return;
                   }
                   final int s = libSeq;
-                  for (int k = 0; k < libItems.size(); k++) {
-                      final int idx = k;
-                      final String[] it = libItems.get(k);
-                      LinearLayout r = Ui.row(this);
-                      r.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
-                      r.setPadding(dp(8), dp(8), dp(10), dp(8));
-                      ImageView th = new ImageView(this);
-                      th.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                      th.setBackground(Ui.box(this, Color.BLACK, 6, 0));
-                      th.setClipToOutline(true);
-                      r.addView(th, new LinearLayout.LayoutParams(dp(112), dp(63)));
-                      LinearLayout mid = Ui.col(this);
-                      mid.setPadding(dp(12), 0, 0, 0);
-                      TextView t = Ui.text(this, it[1], 14, Ui.TEXT, Ui.BODY);
-                      t.setMaxLines(2);
-                      t.setEllipsize(TextUtils.TruncateAt.END);
-                      mid.addView(t);
-                      mid.addView(Ui.hint(this, it[2]), Ui.fill(this, 2));
-                      r.addView(mid, Ui.weight(1));
-                      r.setOnClickListener(v -> playLibrary(idx));
-                      libBox.addView(r, Ui.fill(this, 6));
-                      loadThumb(th, it[0], it[3], s);
+                  if (libGrid) {
+                      LinearLayout row = null;
+                      for (int k = 0; k < libItems.size(); k++) {
+                          if (k % 2 == 0) {
+                              row = Ui.row(this);
+                              row.setGravity(Gravity.TOP);
+                              row.setWeightSum(2);
+                              libBox.addView(row, Ui.fill(this, k == 0 ? 0 : 10));
+                          }
+                          final int idx = k;
+                          final String[] it = libItems.get(k);
+                          LinearLayout cell = Ui.col(this);
+                          cell.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
+                          cell.setPadding(dp(6), dp(6), dp(6), dp(8));
+                          ImageView th = thumbView();
+                          cell.addView(th, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96)));
+                          TextView t = Ui.text(this, it[1], 13, Ui.TEXT, Ui.BODY);
+                          t.setMaxLines(2);
+                          t.setEllipsize(TextUtils.TruncateAt.END);
+                          t.setPadding(dp(2), dp(6), dp(2), 0);
+                          cell.addView(t);
+                          TextView inf = Ui.hint(this, it[2]);
+                          inf.setTextSize(11);
+                          inf.setSingleLine(true);
+                          inf.setEllipsize(TextUtils.TruncateAt.END);
+                          inf.setPadding(dp(2), dp(2), dp(2), 0);
+                          cell.addView(inf);
+                          LinearLayout.LayoutParams cl = Ui.weight(1);
+                          if (k % 2 == 1) cl.leftMargin = dp(10);
+                          row.addView(cell, cl);
+                          bindItem(cell, idx);
+                          loadThumb(th, it[0], s);
+                      }
+                      if (libItems.size() % 2 == 1 && row != null) row.addView(new View(this), Ui.weight(1));
+                  } else {
+                      for (int k = 0; k < libItems.size(); k++) {
+                          final String[] it = libItems.get(k);
+                          LinearLayout r = Ui.row(this);
+                          r.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
+                          r.setPadding(dp(12), dp(10), dp(12), dp(10));
+                          TextView play = Ui.text(this, "\u25B6", 16, Ui.ION, Ui.MEDIUM);
+                          play.setPadding(0, 0, dp(12), 0);
+                          r.addView(play);
+                          LinearLayout mid = Ui.col(this);
+                          TextView t = Ui.text(this, it[1], 14, Ui.TEXT, Ui.BODY);
+                          t.setMaxLines(2);
+                          t.setEllipsize(TextUtils.TruncateAt.END);
+                          mid.addView(t);
+                          mid.addView(Ui.hint(this, it[2]), Ui.fill(this, 2));
+                          r.addView(mid, Ui.weight(1));
+                          libBox.addView(r, Ui.fill(this, 6));
+                          bindItem(r, k);
+                      }
                   }
               }
 
-              @SuppressWarnings("deprecation")
-              void loadThumb(final ImageView iv, final String uri, final String id, final int s) {
-                  final ContentResolver cr = getContentResolver();
-                  bg.execute(() -> {
-                      android.graphics.Bitmap b = null;
-                      try {
-                          if (Build.VERSION.SDK_INT >= 29) {
-                              b = cr.loadThumbnail(Uri.parse(uri), new android.util.Size(224, 126), null);
-                          } else {
-                              b = MediaStore.Video.Thumbnails.getThumbnail(cr, Long.parseLong(id),
-                                      MediaStore.Video.Thumbnails.MINI_KIND, null);
-                          }
-                      } catch (Exception ignored) { }
-                      final android.graphics.Bitmap fb = b;
-                      if (fb != null) h.post(() -> { if (s == libSeq) iv.setImageBitmap(fb); });
+              ImageView thumbView() {
+                  ImageView th = new ImageView(this);
+                  th.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                  th.setBackground(Ui.box(this, Color.BLACK, 6, 0));
+                  th.setClipToOutline(true);
+                  return th;
+              }
+
+              /** Ketuk = putar, tekan lama = hapus dari daftar (atau sekalian hapus filenya). */
+              void bindItem(View v, final int idx) {
+                  v.setOnClickListener(x -> playLibrary(idx));
+                  v.setOnLongClickListener(x -> {
+                      if (idx >= libItems.size()) return true;
+                      final String[] it = libItems.get(idx);
+                      new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                              .setTitle(it[1])
+                              .setItems(new String[]{"Hapus dari daftar", "Hapus dari daftar dan hapus filenya"}, (d, w) -> {
+                                  Set<String> one = new HashSet<>();
+                                  one.add(it[0]);
+                                  removeDownloads(key("downloads"), one);
+                                  if (w == 1) deleteVideoFile(it[0]);
+                                  thumbs.remove(it[0]);
+                                  loadLibrary();
+                              })
+                              .show();
+                      return true;
                   });
+              }
+
+              void deleteVideoFile(String uri) {
+                  try {
+                      Uri u = Uri.parse(uri);
+                      boolean ok;
+                      if ("file".equals(u.getScheme())) ok = u.getPath() != null && new File(u.getPath()).delete();
+                      else ok = getContentResolver().delete(u, null, null) > 0;
+                      setStatus(ok ? "File dihapus." : "File tidak bisa dihapus dari aplikasi, hapus lewat aplikasi Files.", ok ? Ui.ION : Ui.AMBER);
+                  } catch (Exception e) {
+                      setStatus("File tidak bisa dihapus: " + e.getMessage(), Ui.AMBER);
+                  }
+              }
+
+              /** Thumbnail diambil dari bingkai video (detik ke-2), disimpan sementara di memori. */
+              void loadThumb(final ImageView iv, final String uri, final int s) {
+                  Bitmap cached = thumbs.get(uri);
+                  if (cached != null) {
+                      iv.setImageBitmap(cached);
+                      return;
+                  }
+                  final Context app = getApplicationContext();
+                  bg.execute(() -> {
+                      Bitmap b = null;
+                      MediaMetadataRetriever r = new MediaMetadataRetriever();
+                      try {
+                          r.setDataSource(app, Uri.parse(uri));
+                          if (Build.VERSION.SDK_INT >= 27) {
+                              b = r.getScaledFrameAtTime(2000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 320, 180);
+                          } else {
+                              Bitmap f = r.getFrameAtTime(2000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                              if (f != null) {
+                                  float sc = Math.min(1f, 320f / Math.max(1, f.getWidth()));
+                                  b = Bitmap.createScaledBitmap(f, Math.max(1, Math.round(f.getWidth() * sc)),
+                                          Math.max(1, Math.round(f.getHeight() * sc)), true);
+                              }
+                          }
+                      } catch (Exception ignored) {
+                          // format yang tidak bisa dibaca (mis. sebagian .ts): tampil tanpa thumbnail
+                      } finally {
+                          try { r.release(); } catch (Exception ignored) { }
+                      }
+                      final Bitmap fb = b;
+                      if (fb != null) h.post(() -> {
+                          thumbs.put(uri, fb);
+                          if (s == libSeq) iv.setImageBitmap(fb);
+                      });
+                  });
+              }
+
+              // ---------------- KUNCI PIN ----------------
+
+              FrameLayout buildLockLayer() {
+                  FrameLayout layer = new FrameLayout(this);
+                  layer.setBackgroundColor(Ui.ABYSS);
+                  layer.setClickable(true);       // sentuhan tidak tembus ke tampilan di bawahnya
+                  layer.setVisibility(View.GONE);
+                  LinearLayout c = Ui.col(this);
+                  c.setGravity(Gravity.CENTER_HORIZONTAL);
+                  c.setPadding(dp(24), dp(24), dp(24), dp(24));
+                  TextView app = Ui.text(this, "Filecoster", 26, Ui.TEXT, Ui.DISPLAY);
+                  c.addView(app);
+                  lockTitle = Ui.text(this, "", 17, Ui.TEXT, Ui.MEDIUM);
+                  lockTitle.setGravity(Gravity.CENTER);
+                  c.addView(lockTitle, Ui.fill(this, 22));
+                  lockHint = Ui.hint(this, "");
+                  lockHint.setGravity(Gravity.CENTER);
+                  c.addView(lockHint, Ui.fill(this, 6));
+                  lockDots = Ui.text(this, "", 30, Ui.ION, Ui.DISPLAY);
+                  lockDots.setGravity(Gravity.CENTER);
+                  lockDots.setLetterSpacing(0.35f);
+                  c.addView(lockDots, Ui.fill(this, 18));
+                  String[][] keys = {{"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"skip", "0", "del"}};
+                  for (String[] row : keys) {
+                      LinearLayout r = Ui.row(this);
+                      r.setGravity(Gravity.CENTER);
+                      for (String k : row) {
+                          TextView b;
+                          if (k.equals("skip")) {
+                              lockSkip = Ui.text(this, "Lewati", 14, Ui.MUTED, Ui.MEDIUM);
+                              lockSkip.setGravity(Gravity.CENTER);
+                              lockSkip.setClickable(true);
+                              lockSkip.setOnClickListener(v -> cancelLock());
+                              b = lockSkip;
+                          } else if (k.equals("del")) {
+                              b = Ui.text(this, "\u232B", 22, Ui.TEXT, Ui.MEDIUM);
+                              b.setGravity(Gravity.CENTER);
+                              b.setClickable(true);
+                              b.setOnClickListener(v -> {
+                                  if (pinBuf.length() > 0) pinBuf.setLength(pinBuf.length() - 1);
+                                  paintDots();
+                              });
+                          } else {
+                              b = Ui.text(this, k, 26, Ui.TEXT, Ui.DISPLAY);
+                              b.setGravity(Gravity.CENTER);
+                              b.setBackground(Ui.box(this, Ui.PANEL, 36, Ui.LINE));
+                              b.setClickable(true);
+                              b.setOnClickListener(v -> pinKey(k));
+                          }
+                          LinearLayout.LayoutParams kl = new LinearLayout.LayoutParams(dp(72), dp(72));
+                          kl.setMargins(dp(10), dp(8), dp(10), dp(8));
+                          r.addView(b, kl);
+                      }
+                      c.addView(r);
+                  }
+                  layer.addView(c, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+                  return layer;
+              }
+
+              void showLock(int stage) {
+                  pinStage = stage;
+                  pinBuf.setLength(0);
+                  pinFirst = null;
+                  locked = stage == PIN_UNLOCK;
+                  switch (stage) {
+                      case PIN_UNLOCK:
+                          lockTitle.setText("Masukkan PIN");
+                          lockHint.setText("");
+                          break;
+                      case PIN_NEW:
+                          lockTitle.setText("Buat PIN 6 digit");
+                          lockHint.setText("PIN diminta setiap aplikasi dibuka. Jika PIN salah, aplikasi tampil kosong "
+                                  + "seperti baru dipasang: riwayat dan video unduhan tidak ditampilkan.");
+                          break;
+                      case PIN_OLD_CHANGE:
+                          lockTitle.setText("Masukkan PIN lama");
+                          lockHint.setText("Untuk mengganti PIN.");
+                          break;
+                      default:
+                          lockTitle.setText("Masukkan PIN lama");
+                          lockHint.setText("Untuk mematikan PIN.");
+                          break;
+                  }
+                  lockSkip.setText(stage == PIN_NEW && !PinLock.isSet(this) && !prefs.getBoolean("pinAsked", false) ? "Lewati" : "Batal");
+                  lockSkip.setVisibility(stage == PIN_UNLOCK ? View.INVISIBLE : View.VISIBLE);
+                  paintDots();
+                  lockLayer.setVisibility(View.VISIBLE);
+                  lockLayer.bringToFront();
+                  View f = getCurrentFocus();
+                  if (f != null) {
+                      android.view.inputmethod.InputMethodManager im =
+                              (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                      if (im != null) im.hideSoftInputFromWindow(f.getWindowToken(), 0);
+                  }
+              }
+
+              void paintDots() {
+                  StringBuilder d = new StringBuilder();
+                  for (int k = 0; k < PinLock.LEN; k++) d.append(k < pinBuf.length() ? "\u25CF" : "\u25CB");
+                  lockDots.setText(d.toString());
+              }
+
+              void pinKey(String k) {
+                  if (pinBuf.length() >= PinLock.LEN) return;
+                  pinBuf.append(k);
+                  paintDots();
+                  if (pinBuf.length() == PinLock.LEN) {
+                      final String pin = pinBuf.toString();
+                      h.postDelayed(() -> submitPin(pin), 150);
+                  }
+              }
+
+              void submitPin(String pin) {
+                  pinBuf.setLength(0);
+                  switch (pinStage) {
+                      case PIN_UNLOCK:
+                          // Disengaja (permintaan pemilik): PIN salah TIDAK menampilkan pesan error. Aplikasi tetap
+                          // terbuka dengan profil kosong (decoy) yang memakai riwayat/daftar unduhan terpisah
+                          // (lihat key() & applyProfile()), sehingga terlihat seperti aplikasi baru dipasang.
+                          decoy = !PinLock.check(this, pin);
+                          hideLock();
+                          applyProfile();
+                          break;
+                      case PIN_NEW:
+                          pinFirst = pin;
+                          pinStage = PIN_CONFIRM;
+                          lockTitle.setText("Ulangi PIN");
+                          lockHint.setText("Masukkan PIN yang sama sekali lagi.");
+                          paintDots();
+                          break;
+                      case PIN_CONFIRM:
+                          if (pin.equals(pinFirst)) {
+                              try {
+                                  PinLock.set(this, pin);
+                                  prefs.edit().putBoolean("pinAsked", true).apply();
+                                  setStatus("PIN aktif. PIN akan diminta setiap aplikasi dibuka.", Ui.ION);
+                              } catch (Exception e) {
+                                  setStatus("PIN gagal disimpan: " + e.getMessage(), Ui.PULSE);
+                              }
+                              hideLock();
+                              updatePinUi();
+                          } else {
+                              pinStage = PIN_NEW;
+                              pinFirst = null;
+                              lockTitle.setText("Buat PIN 6 digit");
+                              lockHint.setText("PIN tidak sama. Ulangi dari awal.");
+                              paintDots();
+                          }
+                          break;
+                      case PIN_OLD_CHANGE:
+                      case PIN_OLD_REMOVE:
+                          if (!PinLock.check(this, pin)) {
+                              hideLock();
+                              setStatus("PIN lama salah.", Ui.PULSE);
+                              return;
+                          }
+                          if (decoy) {                // pemilik PIN: kembali ke data asli
+                              decoy = false;
+                              applyProfile();
+                          }
+                          if (pinStage == PIN_OLD_CHANGE) {
+                              showLock(PIN_NEW);
+                          } else {
+                              PinLock.clear(this);
+                              hideLock();
+                              updatePinUi();
+                              setStatus("PIN dimatikan.", Ui.AMBER);
+                          }
+                          break;
+                      default:
+                          break;
+                  }
+              }
+
+              void cancelLock() {
+                  if (pinStage == PIN_UNLOCK) return;
+                  if (!PinLock.isSet(this)) prefs.edit().putBoolean("pinAsked", true).apply();
+                  hideLock();
+              }
+
+              void hideLock() {
+                  locked = false;
+                  lockLayer.setVisibility(View.GONE);
+                  pinBuf.setLength(0);
+                  if (pendingShare != null) {
+                      Intent it = pendingShare;
+                      pendingShare = null;
+                      handleShare(it);
+                  }
+              }
+
+              void updatePinUi() {
+                  if (pinInfo == null) return;
+                  boolean on = PinLock.isSet(this);
+                  pinInfo.setText(on ? "PIN aktif. Diminta saat aplikasi dibuka dan setelah ditinggal lebih dari 2 menit. "
+                          + "Jika PIN salah, aplikasi tampil kosong seperti baru dipasang."
+                          : "PIN belum aktif. Siapa pun yang membuka aplikasi bisa melihat riwayat dan video unduhan.");
+                  pinSetBtn.setText(on ? "Ubah PIN" : "Atur PIN");
+                  pinOffBtn.setVisibility(on ? View.VISIBLE : View.GONE);
+                  // sembunyikan isi aplikasi di daftar aplikasi terbaru saat PIN aktif
+                  if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(!on);
+              }
+
+              /** Tampilkan data profil yang aktif (asli atau kosong). Profil kosong = seperti baru dipasang. */
+              void applyProfile() {
+                  loadingPrefs = true;
+                  urlInput.setText(prefs.getString(key("url"), ""));
+                  loadingPrefs = false;
+                  if (decoy && mode == Mode.IDLE) {
+                      videos.clear();
+                      vState = new int[0];
+                      vPct = new int[0];
+                      vNote = new String[0];
+                      rUrl = null;
+                      doneUri.clear();
+                      found.clear();
+                      foldersScanned = 0;
+                      historyUrl = "";
+                      logView.setText("");
+                      stopSniff();
+                      previewOpen = false;
+                      web.loadUrl("about:blank");
+                      buildRows();
+                      showTab(0);
+                      setStatus("Siap. Tempel link folder untuk mulai.", Ui.MUTED);
+                  }
+                  libItems.clear();
+                  thumbs.evictAll();
+                  renderHistory();
+                  loadLibrary();
+                  updatePinUi();
+                  refreshUi();
               }
 
               void playLibrary(int i) {
@@ -5201,7 +5713,7 @@ jobs:
               List<JSONObject> historyList() {
                   List<JSONObject> out = new ArrayList<>();
                   try {
-                      JSONArray a = new JSONArray(prefs.getString("history", "[]"));
+                      JSONArray a = new JSONArray(prefs.getString(key("history"), "[]"));
                       for (int i = 0; i < a.length(); i++) {
                           JSONObject o = a.optJSONObject(i);
                           if (o != null) out.add(o);
@@ -5213,7 +5725,7 @@ jobs:
               void saveHistoryList(List<JSONObject> list) {
                   JSONArray a = new JSONArray();
                   for (JSONObject o : list) a.put(o);
-                  prefs.edit().putString("history", a.toString()).apply();
+                  prefs.edit().putString(key("history"), a.toString()).apply();
               }
 
               /** Catat satu link ke riwayat (yang terbaru di atas). Link yang sama diganti dengan data terbaru. */
@@ -5434,6 +5946,11 @@ jobs:
 
               @Override
               public void onBackPressed() {
+                  if (lockLayer.getVisibility() == View.VISIBLE) {
+                      if (pinStage == PIN_UNLOCK) moveTaskToBack(true);
+                      else cancelLock();
+                      return;
+                  }
                   if (darkOverlay.getVisibility() == View.VISIBLE) setDark(false);
                   else if (mode == Mode.IDLE && web.canGoBack()) web.goBack();
                   else super.onBackPressed();
