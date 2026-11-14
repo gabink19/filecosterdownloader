@@ -1,4 +1,9 @@
 # Filecoster Downloader - build APK otomatis di GitHub.
+# v3.2: tampilan baru yang sederhana (Unduh / Video saya / Lainnya), pemutar ala VLC lebih lengkap
+#       (equalizer, subtitle file, timer tidur, A-B, tangkap layar, dll.), penanda sudah ditonton,
+#       lanjutkan menonton, PIN diminta setiap kali aplikasi kembali dibuka, ukuran video tampil sebelum diunduh.
+# v3.1: pembaruan lebih andal: cek kunci tanda tangan sebelum memasang, cadangan lewat penginstal
+#       APK bawaan Android, kode error pemasangan dicatat.
 # v3.0: halaman web memakai DNS Google 8.8.8.8 (lewat DNS-over-HTTPS), bisa dimatikan di Pengaturan.
 # v2.9: PIN 6 digit (PIN salah = aplikasi tampil kosong seperti baru dipasang), tab Pemutar hanya berisi
 #       video yang diunduh lewat aplikasi, dengan tampilan Thumbnail atau Daftar.
@@ -85,7 +90,7 @@ jobs:
                   minSdk 24
                   targetSdk 34
                   versionCode 1000 + runNumber
-                  versionName "3.0 (build ${runNumber})"
+                  versionName "3.2 (build ${runNumber})"
                   buildConfigField 'int', 'BUILD_NUMBER', "${runNumber}"
                   buildConfigField 'String', 'UPDATE_REPO', "\"${updateRepo}\""
               }
@@ -188,6 +193,11 @@ jobs:
                   <receiver
                       android:name=".UpdateReceiver"
                       android:exported="false" />
+                  <provider
+                      android:name=".ApkProvider"
+                      android:authorities="com.example.fcdownloader.apk"
+                      android:exported="false"
+                      android:grantUriPermissions="true" />
                   <service
                       android:name=".KeepAliveService"
                       android:exported="false"
@@ -803,34 +813,47 @@ jobs:
 
           import android.app.Activity;
           import android.app.AlertDialog;
+          import android.content.ContentValues;
           import android.content.Context;
           import android.content.Intent;
+          import android.content.IntentFilter;
           import android.content.SharedPreferences;
           import android.content.pm.ActivityInfo;
           import android.database.Cursor;
+          import android.graphics.Bitmap;
           import android.graphics.Color;
           import android.graphics.Typeface;
           import android.graphics.drawable.GradientDrawable;
           import android.media.AudioManager;
+          import android.media.audiofx.Equalizer;
+          import android.media.audiofx.LoudnessEnhancer;
           import android.net.Uri;
+          import android.os.BatteryManager;
           import android.os.Build;
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.Looper;
+          import android.provider.MediaStore;
           import android.provider.OpenableColumns;
           import android.provider.Settings;
+          import android.text.InputType;
           import android.text.TextUtils;
           import android.view.GestureDetector;
           import android.view.Gravity;
           import android.view.MotionEvent;
+          import android.view.PixelCopy;
+          import android.view.ScaleGestureDetector;
+          import android.view.SurfaceView;
           import android.view.View;
           import android.view.ViewConfiguration;
           import android.view.ViewGroup;
           import android.view.WindowManager;
           import android.webkit.CookieManager;
+          import android.widget.EditText;
           import android.widget.FrameLayout;
           import android.widget.LinearLayout;
           import android.widget.SeekBar;
+          import android.widget.TextClock;
           import android.widget.TextView;
           import android.widget.Toast;
 
@@ -845,14 +868,18 @@ jobs:
           import androidx.media3.common.TrackSelectionOverride;
           import androidx.media3.common.TrackSelectionParameters;
           import androidx.media3.common.Tracks;
+          import androidx.media3.common.VideoSize;
           import androidx.media3.datasource.DefaultDataSource;
           import androidx.media3.datasource.DefaultHttpDataSource;
           import androidx.media3.exoplayer.ExoPlayer;
           import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
           import androidx.media3.ui.AspectRatioFrameLayout;
+          import androidx.media3.ui.CaptionStyleCompat;
           import androidx.media3.ui.PlayerView;
+          import androidx.media3.ui.SubtitleView;
 
           import java.io.File;
+          import java.io.OutputStream;
           import java.util.ArrayList;
           import java.util.HashMap;
           import java.util.List;
@@ -860,25 +887,32 @@ jobs:
           import java.util.Map;
 
           /**
-           * Pemutar video bergaya VLC (memakai ExoPlayer / Media3): MP4, MKV, WEBM, TS, FLV, 3GP dan stream HLS.
-           * Gestur: geser tegak di kiri = kecerahan, di kanan = volume, geser mendatar = maju/mundur,
-           * ketuk dua kali kiri/kanan = -10/+10 detik, ketuk dua kali tengah = jeda/putar.
-           * Fitur: kunci layar, kecepatan putar, rasio layar, arah layar, pilihan audio & subtitle,
-           * lanjut dari posisi terakhir, daftar putar (sebelumnya/berikutnya).
+           * Pemutar video bergaya VLC (ExoPlayer / Media3): MP4, MKV, WEBM, TS, FLV, 3GP, HLS.
+           *
+           * Gestur: geser tegak kiri = kecerahan, kanan = volume (bisa diperkuat sampai 200%),
+           * geser mendatar = maju/mundur, ketuk dua kali kiri/kanan = -10/+10 detik, tengah = jeda,
+           * tahan = kecepatan 2x selama ditahan, cubit = perbesar/perkecil gambar.
+           *
+           * Menu: kecepatan, rasio layar (Pas/Penuh/Potong/16:9/4:3), arah layar, kunci layar, audio
+           * (trek + equalizer), subtitle (trek, muat file .srt/.vtt/.ass, ukuran, latar), timer tidur,
+           * ulangi A-B, mode ulang & acak, daftar putar, lompat ke waktu, tangkap layar, info video.
+           * Posisi terakhir disimpan dan dilanjutkan (WatchStore).
            */
           public class PlayerActivity extends Activity {
 
               static final String EXTRA_URIS = "uris", EXTRA_TITLES = "titles", EXTRA_INDEX = "index",
                       EXTRA_REFERER = "referer", EXTRA_UA = "ua";
-              static final float[] SPEEDS = {0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 3f};
-              static final int[] RESIZE = {AspectRatioFrameLayout.RESIZE_MODE_FIT, AspectRatioFrameLayout.RESIZE_MODE_FILL,
-                      AspectRatioFrameLayout.RESIZE_MODE_ZOOM};
-              static final String[] RESIZE_NAMES = {"Pas", "Penuh", "Zoom"};
+              static final float[] SPEEDS = {0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f};
+              static final String[] ASPECT_NAMES = {"Pas layar", "Penuh (regang)", "Potong (zoom)", "16:9", "4:3"};
               static final int[] ORIENT = {ActivityInfo.SCREEN_ORIENTATION_SENSOR, ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
                       ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT};
               static final String[] ORIENT_NAMES = {"Otomatis", "Mendatar", "Tegak"};
-              static final long HIDE_MS = 3500, STEP_MS = 10000, SWIPE_FULL_MS = 90000, MIN_RESUME_MS = 5000;
-              static final int G_NONE = 0, G_SEEK = 1, G_VOLUME = 2, G_BRIGHT = 3;
+              static final float[] SUB_SIZES = {0.040f, 0.0533f, 0.068f, 0.085f};
+              static final String[] SUB_SIZE_NAMES = {"Kecil", "Normal", "Besar", "Sangat besar"};
+              static final long HIDE_MS = 3500, STEP_MS = 10000, SWIPE_FULL_MS = 90000, SAVE_EVERY_MS = 5000;
+              static final int G_NONE = 0, G_SEEK = 1, G_VOLUME = 2, G_BRIGHT = 3, G_ZOOM = 4;
+              static final int REQ_SUBTITLE = 11;
+              static final int MAX_BOOST_MB = 1000;          // +10 dB, kira-kira 200% kerasnya
 
               /** Buka pemutar dengan daftar putar. referer/ua hanya dipakai untuk stream dari internet. */
               static void open(Context c, ArrayList<String> uris, ArrayList<String> titles, int index, String referer, String ua) {
@@ -895,32 +929,47 @@ jobs:
               final Handler h = new Handler(Looper.getMainLooper());
               ExoPlayer player;
               PlayerView pv;
+              FrameLayout root;
               SharedPreferences prefs;
               AudioManager am;
               LinearLayout topBar, bottomBar;
-              TextView titleView, posView, durView, playBtn, speedBtn, resizeBtn, orientBtn, unlockBtn, center;
+              TextView titleView, posView, durView, playBtn, aspectBtn, orientBtn, unlockBtn, center, resumeChip, batteryView, abBtn;
               SeekBar seek;
               GestureDetector gd;
+              ScaleGestureDetector sgd;
+              Equalizer eq;
+              LoudnessEnhancer boost;
               final ArrayList<String> uris = new ArrayList<>(), titles = new ArrayList<>();
-              boolean controlsShown = true, locked, userSeeking;
-              int speedIdx = 3, resizeIdx, orientIdx, touchSlop, gMode, startVol;
-              float downX, downY, startBright;
-              long startPos, seekTarget = -1;
+              boolean controlsShown = true, locked, userSeeking, speedHeld;
+              int speedIdx = 3, aspectIdx, orientIdx, subSizeIdx = 1, touchSlop, gMode, startVol, boostMb, startBoost, eqPreset = -1;
+              boolean subBackground;
+              float downX, downY, startBright, zoom = 1f;
+              long startPos, seekTarget = -1, abA = -1, abB = -1, sleepAt;
+              // posisi video yang sedang diputar, untuk disimpan saat pindah video
+              String curUri;
+              long curPos, curDur, lastSave;
 
               final Runnable hider = () -> showControls(false);
               final Runnable centerHider = () -> center.setVisibility(View.GONE);
               final Runnable unlockHider = () -> unlockBtn.setVisibility(View.GONE);
+              final Runnable chipHider = () -> resumeChip.setVisibility(View.GONE);
+              final Runnable sleeper = () -> {
+                  sleepAt = 0;
+                  if (player != null) player.pause();
+                  showCenter("Timer tidur: video dijeda", 3000);
+              };
               final Runnable ticker = new Runnable() {
                   @Override
                   public void run() {
-                      updateProgress();
-                      h.postDelayed(this, 500);
+                      tick();
+                      h.postDelayed(this, 250);
                   }
               };
 
               @Override
               protected void onCreate(Bundle b) {
                   super.onCreate(b);
+                  AppLock.install(getApplication());
                   prefs = getSharedPreferences("player", MODE_PRIVATE);
                   am = (AudioManager) getSystemService(AUDIO_SERVICE);
                   touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
@@ -936,14 +985,35 @@ jobs:
                       finish();
                       return;
                   }
-                  resizeIdx = Math.max(0, Math.min(RESIZE.length - 1, prefs.getInt("resize", 0)));
-                  orientIdx = Math.max(0, Math.min(ORIENT.length - 1, prefs.getInt("orient", 0)));
+                  aspectIdx = clamp(prefs.getInt("aspect", 0), 0, ASPECT_NAMES.length - 1);
+                  orientIdx = clamp(prefs.getInt("orient", 0), 0, ORIENT.length - 1);
+                  subSizeIdx = clamp(prefs.getInt("subSize", 1), 0, SUB_SIZES.length - 1);
+                  subBackground = prefs.getBoolean("subBg", false);
                   setRequestedOrientation(ORIENT[orientIdx]);
                   buildUi();
                   buildPlayer(index);
                   immersive();
                   h.post(ticker);
                   showControls(true);
+              }
+
+              @Override
+              protected void onNewIntent(Intent it) {
+                  super.onNewIntent(it);
+                  // pemutar sudah terbuka lalu video lain dipilih: ganti daftar putar
+                  saveCurrent();
+                  setIntent(it);
+                  uris.clear();
+                  titles.clear();
+                  int index = readIntent(it);
+                  if (uris.isEmpty() || player == null) return;
+                  abA = abB = -1;
+                  updateAbButton();
+                  loadPlaylist(index);
+              }
+
+              static int clamp(int v, int lo, int hi) {
+                  return Math.max(lo, Math.min(hi, v));
               }
 
               /** Isi daftar putar dari intent. Mengembalikan indeks video pertama. */
@@ -967,7 +1037,7 @@ jobs:
                       uris.add(u.get(i));
                       titles.add(t != null && i < t.size() && t.get(i) != null ? t.get(i) : displayName(p));
                   }
-                  return Math.max(0, Math.min(it.getIntExtra(EXTRA_INDEX, 0), uris.size() - 1));
+                  return clamp(it.getIntExtra(EXTRA_INDEX, 0), 0, Math.max(0, uris.size() - 1));
               }
 
               /** Tolak skema aneh dan file di folder privat aplikasi (activity ini bisa dibuka aplikasi lain). */
@@ -1009,26 +1079,41 @@ jobs:
                   t.setTextSize(15);
                   t.setTypeface(Ui.MEDIUM);
                   t.setGravity(Gravity.CENTER);
-                  t.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  t.setSingleLine(true);
+                  t.setPadding(dp(10), dp(10), dp(10), dp(10));
                   t.setClickable(true);
                   t.setFocusable(true);
                   return t;
               }
 
+              TextView label(float sp) {
+                  TextView t = new TextView(this);
+                  t.setTextColor(Color.WHITE);
+                  t.setTextSize(sp);
+                  return t;
+              }
+
+              GradientDrawable pill(int color, float r) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(color);
+                  g.setCornerRadius(dp(r));
+                  return g;
+              }
+
               void buildUi() {
                   final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT, WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
-                  FrameLayout root = new FrameLayout(this);
+                  root = new FrameLayout(this);
                   root.setBackgroundColor(Color.BLACK);
 
                   pv = new PlayerView(this);
                   pv.setUseController(false);
                   pv.setKeepContentOnPlayerReset(true);
                   pv.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS);
-                  pv.setResizeMode(RESIZE[resizeIdx]);
-                  root.addView(pv, new FrameLayout.LayoutParams(MATCH, MATCH));
+                  root.addView(pv, new FrameLayout.LayoutParams(MATCH, MATCH, Gravity.CENTER));
+                  applySubtitleStyle();
 
                   // lapisan gestur di atas video
-                  View touch = new View(this);
+                  final View touch = new View(this);
                   gd = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
                       @Override
                       public boolean onDown(MotionEvent e) {
@@ -1044,72 +1129,88 @@ jobs:
                       @Override
                       public boolean onDoubleTap(MotionEvent e) {
                           float w = touch.getWidth();
-                          if (e.getX() < w / 3f) {
-                              seekBy(-STEP_MS);
-                          } else if (e.getX() > w * 2f / 3f) {
-                              seekBy(STEP_MS);
-                          } else {
-                              togglePlay();
-                          }
+                          if (e.getX() < w / 3f) seekBy(-STEP_MS);
+                          else if (e.getX() > w * 2f / 3f) seekBy(STEP_MS);
+                          else togglePlay();
+                          return true;
+                      }
+
+                      @Override
+                      public void onLongPress(MotionEvent e) {
+                          // tahan = putar 2x selama jari menempel (dilepas di onTouch ACTION_UP)
+                          if (gMode != G_NONE || player == null || !player.isPlaying()) return;
+                          speedHeld = true;
+                          player.setPlaybackSpeed(2f);
+                          showCenter("\u23E9 2x", 0);
+                      }
+                  });
+                  sgd = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                      @Override
+                      public boolean onScale(ScaleGestureDetector d) {
+                          gMode = G_ZOOM;
+                          setZoom(zoom * d.getScaleFactor());
                           return true;
                       }
                   });
                   touch.setOnTouchListener((v, e) -> onTouch(v, e));
                   root.addView(touch, new FrameLayout.LayoutParams(MATCH, MATCH));
 
-                  // teks tengah (volume, kecerahan, posisi, pesan)
                   center = new TextView(this);
                   center.setTextColor(Color.WHITE);
                   center.setTextSize(20);
                   center.setTypeface(Ui.DISPLAY);
                   center.setGravity(Gravity.CENTER);
                   center.setPadding(dp(22), dp(14), dp(22), dp(14));
-                  GradientDrawable cb = new GradientDrawable();
-                  cb.setColor(0xAA000000);
-                  cb.setCornerRadius(dp(14));
-                  center.setBackground(cb);
+                  center.setBackground(pill(0xAA000000, 14));
                   center.setVisibility(View.GONE);
                   root.addView(center, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER));
 
-                  // bilah atas
+                  // bilah atas: kembali, judul, jam, baterai, audio, subtitle, menu
                   topBar = new LinearLayout(this);
                   topBar.setOrientation(LinearLayout.HORIZONTAL);
                   topBar.setGravity(Gravity.CENTER_VERTICAL);
                   topBar.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{0xCC000000, 0x00000000}));
-                  topBar.setPadding(dp(8), dp(8), dp(8), dp(24));
+                  topBar.setPadding(dp(6), dp(8), dp(6), dp(24));
                   TextView back = btn("\u2190");
                   back.setTextSize(22);
                   back.setOnClickListener(v -> finish());
                   topBar.addView(back);
-                  titleView = new TextView(this);
-                  titleView.setTextColor(Color.WHITE);
-                  titleView.setTextSize(16);
+                  titleView = label(16);
                   titleView.setTypeface(Ui.MEDIUM);
                   titleView.setSingleLine(true);
                   titleView.setEllipsize(TextUtils.TruncateAt.END);
                   topBar.addView(titleView, new LinearLayout.LayoutParams(0, WRAP, 1));
+                  TextClock clock = new TextClock(this);
+                  clock.setFormat24Hour("HH:mm");
+                  clock.setFormat12Hour("h:mm a");
+                  clock.setTextColor(Color.WHITE);
+                  clock.setTextSize(13);
+                  clock.setPadding(dp(8), 0, dp(4), 0);
+                  topBar.addView(clock);
+                  batteryView = label(13);
+                  batteryView.setPadding(dp(4), 0, dp(6), 0);
+                  topBar.addView(batteryView);
                   TextView audioBtn = btn("Audio");
-                  audioBtn.setOnClickListener(v -> chooseTrack(C.TRACK_TYPE_AUDIO, "Pilih audio"));
+                  audioBtn.setOnClickListener(v -> audioMenu());
                   topBar.addView(audioBtn);
-                  TextView subBtn = btn("Subtitle");
-                  subBtn.setOnClickListener(v -> chooseTrack(C.TRACK_TYPE_TEXT, "Pilih subtitle"));
+                  TextView subBtn = btn("Sub");
+                  subBtn.setOnClickListener(v -> subtitleMenu());
                   topBar.addView(subBtn);
-                  speedBtn = btn("1x");
-                  speedBtn.setOnClickListener(v -> chooseSpeed());
-                  topBar.addView(speedBtn);
+                  TextView more = btn("\u22EE");
+                  more.setTextSize(22);
+                  more.setOnClickListener(v -> moreMenu());
+                  topBar.addView(more);
                   root.addView(topBar, new FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP));
 
-                  // bilah bawah
+                  // bilah bawah: waktu + bilah geser, lalu tombol
                   bottomBar = new LinearLayout(this);
                   bottomBar.setOrientation(LinearLayout.VERTICAL);
                   bottomBar.setBackground(new GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, new int[]{0xDD000000, 0x00000000}));
-                  bottomBar.setPadding(dp(8), dp(28), dp(8), dp(8));
+                  bottomBar.setPadding(dp(6), dp(28), dp(6), dp(6));
                   LinearLayout prow = new LinearLayout(this);
                   prow.setGravity(Gravity.CENTER_VERTICAL);
-                  posView = new TextView(this);
-                  posView.setTextColor(Color.WHITE);
+                  posView = label(13);
                   posView.setTypeface(Typeface.MONOSPACE);
-                  posView.setTextSize(13);
                   posView.setPadding(dp(8), 0, dp(4), 0);
                   prow.addView(posView);
                   seek = new SeekBar(this);
@@ -1119,7 +1220,10 @@ jobs:
                       public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
                           if (!fromUser || player == null) return;
                           long d = player.getDuration();
-                          if (d > 0) posView.setText(fmt(d * p / 1000));
+                          if (d > 0) {
+                              posView.setText(fmt(d * p / 1000));
+                              showCenter(fmt(d * p / 1000) + " / " + fmt(d), 0);
+                          }
                       }
 
                       @Override
@@ -1133,15 +1237,16 @@ jobs:
                           userSeeking = false;
                           long d = player == null ? 0 : player.getDuration();
                           if (d > 0) player.seekTo(d * s.getProgress() / 1000);
+                          h.removeCallbacks(centerHider);
+                          h.postDelayed(centerHider, 400);
                           showControls(true);
                       }
                   });
                   prow.addView(seek, new LinearLayout.LayoutParams(0, WRAP, 1));
-                  durView = new TextView(this);
-                  durView.setTextColor(Color.WHITE);
+                  durView = label(13);
                   durView.setTypeface(Typeface.MONOSPACE);
-                  durView.setTextSize(13);
                   durView.setPadding(dp(4), 0, dp(8), 0);
+                  durView.setClickable(true);
                   prow.addView(durView);
                   bottomBar.addView(prow);
 
@@ -1154,33 +1259,55 @@ jobs:
                   TextView rew = btn("-10");
                   rew.setOnClickListener(v -> seekBy(-STEP_MS));
                   playBtn = btn("II");
-                  playBtn.setTextSize(22);
+                  playBtn.setTextSize(24);
                   playBtn.setOnClickListener(v -> togglePlay());
                   TextView fwd = btn("+10");
                   fwd.setOnClickListener(v -> seekBy(STEP_MS));
                   TextView next = btn("\u23ED");
                   next.setOnClickListener(v -> skip(1));
-                  resizeBtn = btn(RESIZE_NAMES[resizeIdx]);
-                  resizeBtn.setOnClickListener(v -> cycleResize());
+                  aspectBtn = btn(ASPECT_NAMES[aspectIdx]);
+                  aspectBtn.setTextSize(13);
+                  aspectBtn.setOnClickListener(v -> cycleAspect());
                   orientBtn = btn(ORIENT_NAMES[orientIdx]);
+                  orientBtn.setTextSize(13);
                   orientBtn.setOnClickListener(v -> cycleOrient());
-                  for (TextView t : new TextView[]{lockBtn, prev, rew, playBtn, fwd, next, resizeBtn, orientBtn}) {
+                  for (TextView t : new TextView[]{lockBtn, prev, rew, playBtn, fwd, next, aspectBtn, orientBtn}) {
                       brow.addView(t, new LinearLayout.LayoutParams(0, WRAP, 1));
                   }
                   bottomBar.addView(brow);
                   root.addView(bottomBar, new FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM));
 
+                  // penanda A-B (muncul saat ulangi A-B aktif)
+                  abBtn = btn("");
+                  abBtn.setTextSize(13);
+                  abBtn.setBackground(pill(0xCC0E3B46, 18));
+                  abBtn.setVisibility(View.GONE);
+                  abBtn.setOnClickListener(v -> abStep());
+                  FrameLayout.LayoutParams al = new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.END | Gravity.CENTER_VERTICAL);
+                  al.rightMargin = dp(16);
+                  root.addView(abBtn, al);
+
+                  // "Dilanjutkan dari 12:34 - Mulai dari awal"
+                  resumeChip = btn("");
+                  resumeChip.setTextSize(14);
+                  resumeChip.setBackground(pill(0xE0121A35, 20));
+                  resumeChip.setVisibility(View.GONE);
+                  FrameLayout.LayoutParams rl = new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START | Gravity.BOTTOM);
+                  rl.leftMargin = dp(16);
+                  rl.bottomMargin = dp(120);
+                  root.addView(resumeChip, rl);
+
                   unlockBtn = btn("\uD83D\uDD13 Buka kunci");
-                  GradientDrawable ub = new GradientDrawable();
-                  ub.setColor(0xAA000000);
-                  ub.setCornerRadius(dp(24));
-                  unlockBtn.setBackground(ub);
+                  unlockBtn.setBackground(pill(0xAA000000, 24));
                   unlockBtn.setVisibility(View.GONE);
                   unlockBtn.setOnClickListener(v -> setLocked(false));
                   FrameLayout.LayoutParams ul = new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START | Gravity.CENTER_VERTICAL);
                   ul.leftMargin = dp(24);
                   root.addView(unlockBtn, ul);
 
+                  root.addOnLayoutChangeListener((v, l, t, r, bt, ol, ot, or, ob) -> {
+                      if (r - l != or - ol || bt - t != ob - ot) applyAspect();
+                  });
                   setContentView(root);
               }
 
@@ -1189,14 +1316,15 @@ jobs:
               void buildPlayer(int index) {
                   String ua = getIntent().getStringExtra(EXTRA_UA);
                   if (ua == null || ua.isEmpty()) ua = "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE + ") FilecosterPlayer";
+                  boolean external = Intent.ACTION_VIEW.equals(getIntent().getAction());
                   Map<String, String> hdr = new HashMap<>();
                   String ref = getIntent().getStringExtra(EXTRA_REFERER);
-                  if (ref != null && !Intent.ACTION_VIEW.equals(getIntent().getAction())) hdr.put("Referer", ref);
+                  if (ref != null && !external) hdr.put("Referer", ref);
                   String first = uris.get(index);
-                  if (first.startsWith("http")) {
+                  if (first.startsWith("http") && !external) {
                       try {
                           String cookie = CookieManager.getInstance().getCookie(first);
-                          if (cookie != null && !Intent.ACTION_VIEW.equals(getIntent().getAction())) hdr.put("Cookie", cookie);
+                          if (cookie != null) hdr.put("Cookie", cookie);
                       } catch (Exception ignored) { }
                   }
                   DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
@@ -1216,20 +1344,7 @@ jobs:
                           .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
                           .build(), true);
                   player.setHandleAudioBecomingNoisy(true);
-
-                  List<MediaItem> items = new ArrayList<>();
-                  for (int i = 0; i < uris.size(); i++) {
-                      String u = uris.get(i);
-                      MediaItem.Builder mb = new MediaItem.Builder()
-                              .setUri(u)
-                              .setMediaId(u)
-                              .setMediaMetadata(new MediaMetadata.Builder().setTitle(titles.get(i)).build());
-                      if (u.toLowerCase(Locale.ROOT).contains(".m3u8")) mb.setMimeType(MimeTypes.APPLICATION_M3U8);
-                      items.add(mb.build());
-                  }
-                  long resume = prefs.getLong(posKey(first), 0);
-                  player.setMediaItems(items, index, Math.max(resume, 0));
-                  if (resume > 0) showCenter("Melanjutkan dari " + fmt(resume), 2000);
+                  player.setRepeatMode(clamp(prefs.getInt("repeat", Player.REPEAT_MODE_OFF), 0, 2));
                   player.addListener(new Player.Listener() {
                       @Override
                       public void onIsPlayingChanged(boolean playing) {
@@ -1238,27 +1353,46 @@ jobs:
                               h.removeCallbacks(hider);
                               h.postDelayed(hider, HIDE_MS);
                           }
+                          if (!playing) saveCurrent();
                       }
 
                       @Override
                       public void onPlaybackStateChanged(int state) {
                           if (state == Player.STATE_ENDED) {
-                              MediaItem m = player.getCurrentMediaItem();
-                              if (m != null) prefs.edit().remove(posKey(m.mediaId)).apply();
+                              if (curUri != null) WatchStore.setDone(PlayerActivity.this, curUri, true);
                               showControls(true);
                           }
                       }
 
                       @Override
                       public void onMediaItemTransition(MediaItem item, int reason) {
-                          updateTitle();
-                          if (item != null && reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
-                              long p = prefs.getLong(posKey(item.mediaId), 0);
-                              if (p > 0) {
-                                  player.seekTo(p);
-                                  showCenter("Melanjutkan dari " + fmt(p), 2000);
-                              }
+                          // simpan video sebelumnya (selesai jika berpindah otomatis karena habis)
+                          if (curUri != null && (item == null || !curUri.equals(item.mediaId))) {
+                              if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) WatchStore.setDone(PlayerActivity.this, curUri, true);
+                              else if (curDur > 0) WatchStore.save(PlayerActivity.this, curUri, curPos, curDur);
                           }
+                          curUri = item == null ? null : item.mediaId;
+                          curPos = 0;
+                          curDur = 0;
+                          updateTitle();
+                          zoom = 1f;
+                          setZoom(1f);
+                          abA = abB = -1;
+                          updateAbButton();
+                          if (item != null && reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+                                  && reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
+                              offerResume(item.mediaId, true);
+                          }
+                      }
+
+                      @Override
+                      public void onVideoSizeChanged(VideoSize vs) {
+                          applyAspect();
+                      }
+
+                      @Override
+                      public void onAudioSessionIdChanged(int id) {
+                          attachAudioEffects(id);
                       }
 
                       @Override
@@ -1268,35 +1402,59 @@ jobs:
                       }
                   });
                   pv.setPlayer(player);
-                  updateTitle();
+                  loadPlaylist(index);
+              }
+
+              void loadPlaylist(int index) {
+                  List<MediaItem> items = new ArrayList<>();
+                  for (int i = 0; i < uris.size(); i++) items.add(mediaItem(uris.get(i), titles.get(i), null));
+                  WatchStore.Entry e = WatchStore.get(this, uris.get(index));
+                  long start = e != null && e.resumable() ? e.pos : 0;
+                  curUri = uris.get(index);
+                  player.setMediaItems(items, index, start);
                   player.prepare();
                   player.play();
+                  updateTitle();
+                  offerResume(curUri, false);
               }
 
-              static String posKey(String uri) {
-                  return "pos:" + uri;
+              MediaItem mediaItem(String u, String title, List<MediaItem.SubtitleConfiguration> subs) {
+                  MediaItem.Builder mb = new MediaItem.Builder()
+                          .setUri(u)
+                          .setMediaId(u)
+                          .setMediaMetadata(new MediaMetadata.Builder().setTitle(title).build());
+                  if (u.toLowerCase(Locale.ROOT).contains(".m3u8")) mb.setMimeType(MimeTypes.APPLICATION_M3U8);
+                  if (subs != null) mb.setSubtitleConfigurations(subs);
+                  return mb.build();
               }
 
-              void savePos() {
-                  if (player == null) return;
-                  MediaItem m = player.getCurrentMediaItem();
-                  if (m == null) return;
-                  long pos = player.getCurrentPosition(), dur = player.getDuration();
-                  SharedPreferences.Editor ed = prefs.edit();
-                  if (dur > 0 && pos > MIN_RESUME_MS && pos < dur - MIN_RESUME_MS) ed.putLong(posKey(m.mediaId), pos);
-                  else ed.remove(posKey(m.mediaId));
-                  ed.apply();
+              /** Seperti VLC: lanjut otomatis dari posisi terakhir, dengan pilihan "Mulai dari awal". */
+              void offerResume(String uri, boolean seekNow) {
+                  WatchStore.Entry e = WatchStore.get(this, uri);
+                  if (e == null || !e.resumable()) {
+                      resumeChip.setVisibility(View.GONE);
+                      return;
+                  }
+                  if (seekNow) player.seekTo(e.pos);
+                  resumeChip.setText("Dilanjutkan dari " + fmt(e.pos) + "   \u21BA Mulai dari awal");
+                  resumeChip.setOnClickListener(v -> {
+                      player.seekTo(0);
+                      resumeChip.setVisibility(View.GONE);
+                      showCenter("Dari awal", 800);
+                  });
+                  resumeChip.setVisibility(View.VISIBLE);
+                  h.removeCallbacks(chipHider);
+                  h.postDelayed(chipHider, 7000);
               }
 
-              void updateTitle() {
-                  int i = player == null ? 0 : player.getCurrentMediaItemIndex();
-                  String t = i >= 0 && i < titles.size() ? titles.get(i) : "Video";
-                  titleView.setText(uris.size() > 1 ? (i + 1) + "/" + uris.size() + "  " + t : t);
-              }
-
-              void updateProgress() {
+              /** Dipanggil 4x per detik: bilah waktu, simpan posisi, ulangi A-B. */
+              void tick() {
                   if (player == null) return;
                   long d = player.getDuration(), p = player.getCurrentPosition();
+                  if (d > 0) {
+                      curPos = p;
+                      curDur = d;
+                  }
                   if (!userSeeking) {
                       posView.setText(fmt(p));
                       if (d > 0) {
@@ -1305,6 +1463,35 @@ jobs:
                       }
                   }
                   durView.setText(d > 0 ? fmt(d) : "--:--");
+                  if (abA >= 0 && abB > abA && p >= abB) player.seekTo(abA);
+                  long now = System.currentTimeMillis();
+                  if (player.isPlaying() && now - lastSave > SAVE_EVERY_MS) {
+                      lastSave = now;
+                      saveCurrent();
+                  }
+                  if (controlsShown && now % 30000 < 300) updateBattery();
+              }
+
+              void saveCurrent() {
+                  if (player == null || curUri == null) return;
+                  long d = player.getDuration();
+                  if (d > 0) WatchStore.save(this, curUri, player.getCurrentPosition(), d);
+              }
+
+              void updateTitle() {
+                  int i = player == null ? 0 : player.getCurrentMediaItemIndex();
+                  String t = i >= 0 && i < titles.size() ? titles.get(i) : "Video";
+                  titleView.setText(uris.size() > 1 ? (i + 1) + "/" + uris.size() + "  " + t : t);
+              }
+
+              void updateBattery() {
+                  try {
+                      Intent bi = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                      if (bi == null) return;
+                      int lvl = bi.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), sc = bi.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+                      boolean chg = bi.getIntExtra(BatteryManager.EXTRA_STATUS, 0) == BatteryManager.BATTERY_STATUS_CHARGING;
+                      if (lvl >= 0 && sc > 0) batteryView.setText((chg ? "\u26A1" : "") + (lvl * 100 / sc) + "%");
+                  } catch (Exception ignored) { }
               }
 
               void togglePlay() {
@@ -1330,7 +1517,7 @@ jobs:
 
               void skip(int dir) {
                   if (player == null) return;
-                  savePos();
+                  saveCurrent();
                   if (dir > 0 && player.hasNextMediaItem()) player.seekToNextMediaItem();
                   else if (dir < 0 && player.hasPreviousMediaItem()) player.seekToPreviousMediaItem();
                   else if (dir < 0) player.seekTo(0);
@@ -1338,81 +1525,52 @@ jobs:
                   showControls(true);
               }
 
-              void chooseSpeed() {
-                  String[] names = new String[SPEEDS.length];
-                  for (int i = 0; i < SPEEDS.length; i++) names[i] = speedLabel(SPEEDS[i]) + (i == speedIdx ? "  \u2713" : "");
-                  new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                          .setTitle("Kecepatan putar")
-                          .setItems(names, (d, w) -> {
-                              speedIdx = w;
-                              player.setPlaybackSpeed(SPEEDS[w]);
-                              speedBtn.setText(speedLabel(SPEEDS[w]));
-                              showCenter("Kecepatan " + speedLabel(SPEEDS[w]), 900);
-                          })
-                          .show();
-              }
+              // ---------------- RASIO, ARAH, ZOOM ----------------
 
-              static String speedLabel(float s) {
-                  return (s == Math.round(s) ? String.valueOf((int) s) : String.valueOf(s)) + "x";
-              }
-
-              void chooseTrack(final int type, String title) {
-                  if (player == null) return;
-                  final List<Tracks.Group> groups = new ArrayList<>();
-                  final List<Integer> idx = new ArrayList<>();
-                  List<String> names = new ArrayList<>();
-                  if (type == C.TRACK_TYPE_TEXT) {
-                      boolean off = player.getTrackSelectionParameters().disabledTrackTypes.contains(C.TRACK_TYPE_TEXT);
-                      names.add("Mati" + (off ? "  \u2713" : ""));
-                      groups.add(null);
-                      idx.add(-1);
-                  }
-                  int n = 0;
-                  for (Tracks.Group g : player.getCurrentTracks().getGroups()) {
-                      if (g.getType() != type) continue;
-                      for (int k = 0; k < g.length; k++) {
-                          if (!g.isTrackSupported(k)) continue;
-                          n++;
-                          names.add(trackName(g.getTrackFormat(k), n) + (g.isTrackSelected(k) ? "  \u2713" : ""));
-                          groups.add(g);
-                          idx.add(k);
-                      }
-                  }
-                  if (n == 0) {
-                      showCenter(type == C.TRACK_TYPE_AUDIO ? "Tidak ada pilihan audio" : "Video ini tidak punya subtitle", 1500);
-                      return;
-                  }
-                  new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                          .setTitle(title)
-                          .setItems(names.toArray(new String[0]), (d, w) -> {
-                              TrackSelectionParameters.Builder pb = player.getTrackSelectionParameters().buildUpon();
-                              Tracks.Group g = groups.get(w);
-                              if (g == null) {
-                                  pb.setTrackTypeDisabled(type, true);
+              /** Pas/Penuh/Potong memakai mode PlayerView; 16:9 dan 4:3 membentuk kotak tetap di tengah layar. */
+              void applyAspect() {
+                  if (pv == null || root == null) return;
+                  int W = root.getWidth(), H = root.getHeight();
+                  FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) pv.getLayoutParams();
+                  int w = ViewGroup.LayoutParams.MATCH_PARENT, hh = ViewGroup.LayoutParams.MATCH_PARENT;
+                  int mode;
+                  switch (aspectIdx) {
+                      case 1: mode = AspectRatioFrameLayout.RESIZE_MODE_FILL; break;
+                      case 2: mode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM; break;
+                      case 3:
+                      case 4: {
+                          mode = AspectRatioFrameLayout.RESIZE_MODE_FILL;
+                          float r = aspectIdx == 3 ? 16f / 9f : 4f / 3f;
+                          if (W > 0 && H > 0) {
+                              if ((float) W / H > r) {
+                                  hh = H;
+                                  w = Math.round(H * r);
                               } else {
-                                  pb.setTrackTypeDisabled(type, false)
-                                          .setOverrideForType(new TrackSelectionOverride(g.getMediaTrackGroup(), idx.get(w)));
+                                  w = W;
+                                  hh = Math.round(W / r);
                               }
-                              player.setTrackSelectionParameters(pb.build());
-                          })
-                          .show();
-              }
-
-              static String trackName(Format f, int n) {
-                  StringBuilder sb = new StringBuilder(f.label != null && !f.label.isEmpty() ? f.label : "Trek " + n);
-                  if (f.language != null && !f.language.isEmpty() && !"und".equals(f.language)) {
-                      sb.append(" (").append(new Locale(f.language).getDisplayLanguage()).append(")");
+                          }
+                          break;
+                      }
+                      default: mode = AspectRatioFrameLayout.RESIZE_MODE_FIT;
                   }
-                  if (f.channelCount > 0) sb.append(" \u00B7 ").append(f.channelCount).append(" ch");
-                  return sb.toString();
+                  pv.setResizeMode(mode);
+                  if (lp.width != w || lp.height != hh) {
+                      lp.width = w;
+                      lp.height = hh;
+                      lp.gravity = Gravity.CENTER;
+                      pv.setLayoutParams(lp);
+                  }
               }
 
-              void cycleResize() {
-                  resizeIdx = (resizeIdx + 1) % RESIZE.length;
-                  pv.setResizeMode(RESIZE[resizeIdx]);
-                  resizeBtn.setText(RESIZE_NAMES[resizeIdx]);
-                  prefs.edit().putInt("resize", resizeIdx).apply();
-                  showCenter("Layar: " + RESIZE_NAMES[resizeIdx], 900);
+              void cycleAspect() {
+                  aspectIdx = (aspectIdx + 1) % ASPECT_NAMES.length;
+                  prefs.edit().putInt("aspect", aspectIdx).apply();
+                  aspectBtn.setText(ASPECT_NAMES[aspectIdx]);
+                  zoom = 1f;
+                  setZoom(1f);
+                  applyAspect();
+                  showCenter("Layar: " + ASPECT_NAMES[aspectIdx], 900);
                   showControls(true);
               }
 
@@ -1424,6 +1582,456 @@ jobs:
                   showCenter("Arah layar: " + ORIENT_NAMES[orientIdx], 900);
                   showControls(true);
               }
+
+              void setZoom(float z) {
+                  zoom = Math.max(1f, Math.min(4f, z));
+                  View s = pv.getVideoSurfaceView();
+                  if (s != null) {
+                      s.setScaleX(zoom);
+                      s.setScaleY(zoom);
+                  }
+                  if (gMode == G_ZOOM) showCenter("Zoom " + Math.round(zoom * 100) + "%", 0);
+              }
+
+              // ---------------- MENU ----------------
+
+              AlertDialog.Builder dialog(String title) {
+                  return new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle(title);
+              }
+
+              void moreMenu() {
+                  final List<String> names = new ArrayList<>();
+                  final List<Runnable> acts = new ArrayList<>();
+                  addItem(names, acts, "Kecepatan putar (" + speedLabel(SPEEDS[speedIdx]) + ")", this::chooseSpeed);
+                  addItem(names, acts, "Timer tidur" + (sleepAt > 0 ? " (" + Math.max(1, (sleepAt - System.currentTimeMillis()) / 60000) + " mnt lagi)"
+                          : (player.getPauseAtEndOfMediaItems() ? " (akhir video)" : "")), this::sleepMenu);
+                  addItem(names, acts, abA < 0 ? "Ulangi A-B: tandai titik A" : (abB < 0 ? "Ulangi A-B: tandai titik B" : "Ulangi A-B: matikan"), this::abStep);
+                  String[] rep = {"Mati", "Ulangi video ini", "Ulangi semua"};
+                  addItem(names, acts, "Mode ulang: " + rep[player.getRepeatMode()], this::cycleRepeat);
+                  addItem(names, acts, "Acak: " + (player.getShuffleModeEnabled() ? "aktif" : "mati"), () -> {
+                      player.setShuffleModeEnabled(!player.getShuffleModeEnabled());
+                      showCenter(player.getShuffleModeEnabled() ? "Acak aktif" : "Acak mati", 900);
+                  });
+                  if (uris.size() > 1) addItem(names, acts, "Daftar putar (" + uris.size() + " video)", this::playlistMenu);
+                  addItem(names, acts, "Lompat ke waktu ...", this::jumpDialog);
+                  addItem(names, acts, "Rasio layar: " + ASPECT_NAMES[aspectIdx], () -> dialog("Rasio layar")
+                          .setItems(ASPECT_NAMES, (d, w) -> {
+                              aspectIdx = w - 1 < 0 ? ASPECT_NAMES.length - 1 : w - 1;
+                              cycleAspect();
+                          }).show());
+                  addItem(names, acts, "Tangkap layar", this::screenshot);
+                  addItem(names, acts, "Tandai sudah ditonton", () -> {
+                      if (curUri != null) WatchStore.setDone(this, curUri, true);
+                      showCenter("Ditandai sudah ditonton", 900);
+                  });
+                  addItem(names, acts, "Info video", this::infoDialog);
+                  dialog("Menu").setItems(names.toArray(new String[0]), (d, w) -> acts.get(w).run()).show();
+              }
+
+              static void addItem(List<String> names, List<Runnable> acts, String n, Runnable r) {
+                  names.add(n);
+                  acts.add(r);
+              }
+
+              void chooseSpeed() {
+                  String[] names = new String[SPEEDS.length];
+                  for (int i = 0; i < SPEEDS.length; i++) names[i] = speedLabel(SPEEDS[i]) + (i == speedIdx ? "  \u2713" : "");
+                  dialog("Kecepatan putar").setItems(names, (d, w) -> {
+                      speedIdx = w;
+                      player.setPlaybackSpeed(SPEEDS[w]);
+                      showCenter("Kecepatan " + speedLabel(SPEEDS[w]), 900);
+                  }).show();
+              }
+
+              static String speedLabel(float s) {
+                  return (s == Math.round(s) ? String.valueOf((int) s) : String.valueOf(s)) + "x";
+              }
+
+              void sleepMenu() {
+                  final int[] mins = {0, 15, 30, 45, 60, 90, -1};
+                  String[] names = {"Mati", "15 menit", "30 menit", "45 menit", "60 menit", "90 menit", "Di akhir video ini"};
+                  dialog("Timer tidur").setItems(names, (d, w) -> {
+                      h.removeCallbacks(sleeper);
+                      sleepAt = 0;
+                      player.setPauseAtEndOfMediaItems(false);
+                      if (mins[w] > 0) {
+                          sleepAt = System.currentTimeMillis() + mins[w] * 60000L;
+                          h.postDelayed(sleeper, mins[w] * 60000L);
+                          showCenter("Video dijeda dalam " + mins[w] + " menit", 1200);
+                      } else if (mins[w] < 0) {
+                          player.setPauseAtEndOfMediaItems(true);
+                          showCenter("Dijeda di akhir video ini", 1200);
+                      } else {
+                          showCenter("Timer tidur mati", 900);
+                      }
+                  }).show();
+              }
+
+              void abStep() {
+                  if (player == null) return;
+                  long p = player.getCurrentPosition();
+                  if (abA < 0) {
+                      abA = p;
+                      showCenter("Titik A: " + fmt(p), 1000);
+                  } else if (abB < 0) {
+                      if (p <= abA + 500) {
+                          showCenter("Titik B harus setelah A", 1000);
+                          return;
+                      }
+                      abB = p;
+                      player.seekTo(abA);
+                      showCenter("Ulangi " + fmt(abA) + " - " + fmt(abB), 1200);
+                  } else {
+                      abA = abB = -1;
+                      showCenter("Ulangi A-B mati", 900);
+                  }
+                  updateAbButton();
+              }
+
+              void updateAbButton() {
+                  if (abBtn == null) return;
+                  if (abA < 0) {
+                      abBtn.setVisibility(View.GONE);
+                      return;
+                  }
+                  abBtn.setText(abB < 0 ? "A " + fmt(abA) + "  \u2022 tandai B" : "A-B  \u2715");
+                  abBtn.setVisibility(View.VISIBLE);
+              }
+
+              void cycleRepeat() {
+                  int m = (player.getRepeatMode() + 1) % 3;
+                  player.setRepeatMode(m);
+                  prefs.edit().putInt("repeat", m).apply();
+                  showCenter(new String[]{"Ulang mati", "Ulangi video ini", "Ulangi semua"}[m], 900);
+              }
+
+              void playlistMenu() {
+                  String[] names = new String[uris.size()];
+                  int cur = player.getCurrentMediaItemIndex();
+                  for (int i = 0; i < names.length; i++) {
+                      WatchStore.Entry e = WatchStore.get(this, uris.get(i));
+                      String mark = i == cur ? "\u25B6 " : (e != null && e.done ? "\u2713 " : (e != null && e.percent() > 0 ? e.percent() + "%  " : ""));
+                      names[i] = mark + titles.get(i);
+                  }
+                  dialog("Daftar putar").setItems(names, (d, w) -> {
+                      saveCurrent();
+                      player.seekTo(w, 0);
+                  }).show();
+              }
+
+              void jumpDialog() {
+                  final EditText in = new EditText(this);
+                  in.setInputType(InputType.TYPE_CLASS_DATETIME | InputType.TYPE_DATETIME_VARIATION_TIME);
+                  in.setHint("mis. 1:23:45 atau 12:30");
+                  in.setText(fmt(player.getCurrentPosition()));
+                  in.setSelectAllOnFocus(true);
+                  dialog("Lompat ke waktu").setView(in).setPositiveButton("Lompat", (d, w) -> {
+                      long t = parseTime(in.getText().toString());
+                      long dur = player.getDuration();
+                      if (t < 0 || (dur > 0 && t > dur)) {
+                          showCenter("Waktu tidak valid", 1000);
+                          return;
+                      }
+                      player.seekTo(t);
+                  }).setNegativeButton("Batal", null).show();
+              }
+
+              static long parseTime(String s) {
+                  try {
+                      String[] p = s.trim().split("[:.]");
+                      long t = 0;
+                      for (String x : p) t = t * 60 + Long.parseLong(x.trim());
+                      return t * 1000;
+                  } catch (Exception e) {
+                      return -1;
+                  }
+              }
+
+              void infoDialog() {
+                  StringBuilder sb = new StringBuilder();
+                  int i = player.getCurrentMediaItemIndex();
+                  sb.append(i >= 0 && i < titles.size() ? titles.get(i) : "Video").append("\n\n");
+                  long d = player.getDuration();
+                  sb.append("Durasi: ").append(d > 0 ? fmt(d) : "-").append("\n");
+                  Format v = player.getVideoFormat(), a = player.getAudioFormat();
+                  if (v != null) {
+                      sb.append("Video: ").append(v.width).append("x").append(v.height);
+                      if (v.frameRate > 0) sb.append(", ").append(Math.round(v.frameRate)).append(" fps");
+                      if (v.sampleMimeType != null) sb.append(", ").append(v.sampleMimeType.replace("video/", ""));
+                      if (v.bitrate > 0) sb.append(", ").append(v.bitrate / 1000).append(" kbps");
+                      sb.append("\n");
+                  }
+                  if (a != null) {
+                      sb.append("Audio: ");
+                      if (a.sampleMimeType != null) sb.append(a.sampleMimeType.replace("audio/", ""));
+                      if (a.channelCount > 0) sb.append(", ").append(a.channelCount).append(" ch");
+                      if (a.sampleRate > 0) sb.append(", ").append(a.sampleRate).append(" Hz");
+                      if (a.bitrate > 0) sb.append(", ").append(a.bitrate / 1000).append(" kbps");
+                      sb.append("\n");
+                  }
+                  if (curUri != null) sb.append("\n").append(curUri);
+                  dialog("Info video").setMessage(sb.toString()).setPositiveButton("Tutup", null).show();
+              }
+
+              // ---------------- AUDIO ----------------
+
+              void audioMenu() {
+                  final List<String> names = new ArrayList<>();
+                  final List<Runnable> acts = new ArrayList<>();
+                  int n = 0;
+                  for (final Tracks.Group g : player.getCurrentTracks().getGroups()) {
+                      if (g.getType() != C.TRACK_TYPE_AUDIO) continue;
+                      for (int k = 0; k < g.length; k++) {
+                          if (!g.isTrackSupported(k)) continue;
+                          n++;
+                          final int kk = k;
+                          addItem(names, acts, trackName(g.getTrackFormat(k), n) + (g.isTrackSelected(k) ? "  \u2713" : ""),
+                                  () -> selectTrack(C.TRACK_TYPE_AUDIO, g, kk));
+                      }
+                  }
+                  addItem(names, acts, "Equalizer ...", this::eqMenu);
+                  addItem(names, acts, "Penguat suara: " + (100 + boostMb * 100 / MAX_BOOST_MB) + "%", this::boostMenu);
+                  dialog(n > 1 ? "Audio" : "Audio (1 trek)").setItems(names.toArray(new String[0]), (d, w) -> acts.get(w).run()).show();
+              }
+
+              void selectTrack(int type, Tracks.Group g, int idx) {
+                  TrackSelectionParameters.Builder pb = player.getTrackSelectionParameters().buildUpon();
+                  if (g == null) {
+                      pb.setTrackTypeDisabled(type, true);
+                  } else {
+                      pb.setTrackTypeDisabled(type, false)
+                              .setOverrideForType(new TrackSelectionOverride(g.getMediaTrackGroup(), idx));
+                  }
+                  player.setTrackSelectionParameters(pb.build());
+              }
+
+              static String trackName(Format f, int n) {
+                  StringBuilder sb = new StringBuilder(f.label != null && !f.label.isEmpty() ? f.label : "Trek " + n);
+                  if (f.language != null && !f.language.isEmpty() && !"und".equals(f.language)) {
+                      sb.append(" (").append(new Locale(f.language).getDisplayLanguage()).append(")");
+                  }
+                  if (f.channelCount > 0) sb.append(" \u00B7 ").append(f.channelCount).append(" ch");
+                  return sb.toString();
+              }
+
+              void attachAudioEffects(int sessionId) {
+                  releaseAudioEffects();
+                  if (sessionId == C.AUDIO_SESSION_ID_UNSET) return;
+                  try {
+                      boost = new LoudnessEnhancer(sessionId);
+                      boost.setTargetGain(boostMb);
+                      boost.setEnabled(boostMb > 0);
+                  } catch (Exception e) {
+                      boost = null;
+                  }
+                  if (eqPreset >= 0) applyEq(eqPreset);
+              }
+
+              void releaseAudioEffects() {
+                  try { if (boost != null) boost.release(); } catch (Exception ignored) { }
+                  try { if (eq != null) eq.release(); } catch (Exception ignored) { }
+                  boost = null;
+                  eq = null;
+              }
+
+              void setBoost(int mb) {
+                  boostMb = Math.max(0, Math.min(MAX_BOOST_MB, mb));
+                  try {
+                      if (boost == null && player != null) boost = new LoudnessEnhancer(player.getAudioSessionId());
+                      if (boost != null) {
+                          boost.setTargetGain(boostMb);
+                          boost.setEnabled(boostMb > 0);
+                      }
+                  } catch (Exception ignored) { }
+              }
+
+              void boostMenu() {
+                  final int[] vals = {0, 250, 500, 750, 1000};
+                  String[] names = {"100% (mati)", "125%", "150%", "175%", "200%"};
+                  dialog("Penguat suara").setItems(names, (d, w) -> {
+                      setBoost(vals[w]);
+                      showCenter("Penguat suara " + names[w], 900);
+                  }).show();
+              }
+
+              void eqMenu() {
+                  Equalizer e = eq;
+                  try {
+                      if (e == null) e = new Equalizer(0, player.getAudioSessionId());
+                      short n = e.getNumberOfPresets();
+                      String[] names = new String[n + 1];
+                      names[0] = "Mati" + (eqPreset < 0 ? "  \u2713" : "");
+                      for (short i = 0; i < n; i++) names[i + 1] = e.getPresetName(i) + (i == eqPreset ? "  \u2713" : "");
+                      if (eq == null) e.release();
+                      dialog("Equalizer").setItems(names, (d, w) -> {
+                          if (w == 0) {
+                              eqPreset = -1;
+                              try { if (eq != null) eq.setEnabled(false); } catch (Exception ignored) { }
+                              showCenter("Equalizer mati", 900);
+                          } else {
+                              applyEq(w - 1);
+                              showCenter("Equalizer: " + names[w].replace("  \u2713", ""), 900);
+                          }
+                      }).show();
+                  } catch (Exception ex) {
+                      showCenter("Equalizer tidak tersedia di HP ini", 1500);
+                  }
+              }
+
+              void applyEq(int preset) {
+                  try {
+                      if (eq == null) eq = new Equalizer(0, player.getAudioSessionId());
+                      eq.usePreset((short) preset);
+                      eq.setEnabled(true);
+                      eqPreset = preset;
+                  } catch (Exception e) {
+                      eqPreset = -1;
+                  }
+              }
+
+              // ---------------- SUBTITLE ----------------
+
+              void subtitleMenu() {
+                  final List<String> names = new ArrayList<>();
+                  final List<Runnable> acts = new ArrayList<>();
+                  boolean off = player.getTrackSelectionParameters().disabledTrackTypes.contains(C.TRACK_TYPE_TEXT);
+                  addItem(names, acts, "Mati" + (off ? "  \u2713" : ""), () -> selectTrack(C.TRACK_TYPE_TEXT, null, -1));
+                  int n = 0;
+                  for (final Tracks.Group g : player.getCurrentTracks().getGroups()) {
+                      if (g.getType() != C.TRACK_TYPE_TEXT) continue;
+                      for (int k = 0; k < g.length; k++) {
+                          if (!g.isTrackSupported(k)) continue;
+                          n++;
+                          final int kk = k;
+                          addItem(names, acts, trackName(g.getTrackFormat(k), n) + (g.isTrackSelected(k) && !off ? "  \u2713" : ""),
+                                  () -> selectTrack(C.TRACK_TYPE_TEXT, g, kk));
+                      }
+                  }
+                  addItem(names, acts, "Muat subtitle dari file (.srt .vtt .ass) ...", this::pickSubtitle);
+                  addItem(names, acts, "Ukuran teks: " + SUB_SIZE_NAMES[subSizeIdx], () -> dialog("Ukuran subtitle")
+                          .setItems(SUB_SIZE_NAMES, (d, w) -> {
+                              subSizeIdx = w;
+                              prefs.edit().putInt("subSize", w).apply();
+                              applySubtitleStyle();
+                          }).show());
+                  addItem(names, acts, "Latar hitam di belakang teks: " + (subBackground ? "aktif" : "mati"), () -> {
+                      subBackground = !subBackground;
+                      prefs.edit().putBoolean("subBg", subBackground).apply();
+                      applySubtitleStyle();
+                  });
+                  dialog(n == 0 ? "Subtitle (video ini tidak punya subtitle bawaan)" : "Subtitle")
+                          .setItems(names.toArray(new String[0]), (d, w) -> acts.get(w).run()).show();
+              }
+
+              void applySubtitleStyle() {
+                  SubtitleView sv = pv == null ? null : pv.getSubtitleView();
+                  if (sv == null) return;
+                  sv.setApplyEmbeddedStyles(true);
+                  sv.setFractionalTextSize(SUB_SIZES[subSizeIdx]);
+                  sv.setStyle(new CaptionStyleCompat(Color.WHITE, subBackground ? 0xAA000000 : Color.TRANSPARENT, Color.TRANSPARENT,
+                          subBackground ? CaptionStyleCompat.EDGE_TYPE_NONE : CaptionStyleCompat.EDGE_TYPE_OUTLINE, Color.BLACK, null));
+              }
+
+              void pickSubtitle() {
+                  Intent it = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  it.addCategory(Intent.CATEGORY_OPENABLE);
+                  it.setType("*/*");
+                  try {
+                      AppLock.expectExternal();
+                      startActivityForResult(it, REQ_SUBTITLE);
+                  } catch (Exception e) {
+                      showCenter("Pemilih file tidak tersedia", 1200);
+                  }
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req != REQ_SUBTITLE || res != RESULT_OK || data == null || data.getData() == null || player == null) return;
+                  Uri su = data.getData();
+                  String name = displayName(su).toLowerCase(Locale.ROOT);
+                  String mime;
+                  if (name.endsWith(".srt")) mime = MimeTypes.APPLICATION_SUBRIP;
+                  else if (name.endsWith(".vtt")) mime = MimeTypes.TEXT_VTT;
+                  else if (name.endsWith(".ass") || name.endsWith(".ssa")) mime = MimeTypes.TEXT_SSA;
+                  else {
+                      showCenter("Format subtitle tidak dikenal.\nGunakan .srt, .vtt, atau .ass", 2500);
+                      return;
+                  }
+                  int idx = player.getCurrentMediaItemIndex();
+                  MediaItem cur = player.getCurrentMediaItem();
+                  if (cur == null || idx < 0) return;
+                  List<MediaItem.SubtitleConfiguration> subs = new ArrayList<>();
+                  if (cur.localConfiguration != null) subs.addAll(cur.localConfiguration.subtitleConfigurations);
+                  subs.add(new MediaItem.SubtitleConfiguration.Builder(su)
+                          .setMimeType(mime)
+                          .setLabel(displayName(su))
+                          .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                          .build());
+                  long pos = player.getCurrentPosition();
+                  boolean playing = player.isPlaying();
+                  player.replaceMediaItem(idx, mediaItem(uris.get(idx), titles.get(idx), subs));
+                  player.seekTo(idx, pos);
+                  player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+                          .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).build());
+                  if (playing) player.play();
+                  showCenter("Subtitle dimuat", 1000);
+              }
+
+              // ---------------- TANGKAP LAYAR ----------------
+
+              void screenshot() {
+                  View s = pv.getVideoSurfaceView();
+                  if (!(s instanceof SurfaceView) || s.getWidth() <= 0 || s.getHeight() <= 0) {
+                      showCenter("Tangkap layar tidak tersedia", 1200);
+                      return;
+                  }
+                  if (Build.VERSION.SDK_INT < 29) {
+                      showCenter("Tangkap layar butuh Android 10 ke atas", 1500);
+                      return;
+                  }
+                  Format v = player.getVideoFormat();
+                  int w = v != null && v.width > 0 ? v.width : s.getWidth(), hh = v != null && v.height > 0 ? v.height : s.getHeight();
+                  if ((long) w * hh > 3840L * 2160L) {
+                      w = s.getWidth();
+                      hh = s.getHeight();
+                  }
+                  final Bitmap bmp = Bitmap.createBitmap(w, hh, Bitmap.Config.ARGB_8888);
+                  try {
+                      PixelCopy.request((SurfaceView) s, bmp, r -> {
+                          if (r != PixelCopy.SUCCESS) {
+                              showCenter("Tangkap layar gagal", 1200);
+                              return;
+                          }
+                          saveScreenshot(bmp);
+                      }, h);
+                  } catch (Exception e) {
+                      showCenter("Tangkap layar gagal", 1200);
+                  }
+              }
+
+              void saveScreenshot(Bitmap bmp) {
+                  String name = "Filecoster_" + System.currentTimeMillis() + ".jpg";
+                  try {
+                      ContentValues cv = new ContentValues();
+                      cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                      cv.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+                      cv.put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/Filecoster");
+                      Uri u = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+                      if (u == null) throw new IllegalStateException("tidak bisa membuat file");
+                      try (OutputStream os = getContentResolver().openOutputStream(u)) {
+                          if (os == null) throw new IllegalStateException("tidak bisa menulis file");
+                          bmp.compress(Bitmap.CompressFormat.JPEG, 92, os);
+                      }
+                      showCenter("Tersimpan di Pictures/Filecoster", 1500);
+                  } catch (Exception e) {
+                      showCenter("Tangkap layar gagal: " + e.getMessage(), 2000);
+                  } finally {
+                      bmp.recycle();
+                  }
+              }
+
+              // ---------------- KUNCI & KONTROL ----------------
 
               void setLocked(boolean on) {
                   locked = on;
@@ -1446,7 +2054,10 @@ jobs:
                   topBar.setVisibility(controlsShown ? View.VISIBLE : View.GONE);
                   bottomBar.setVisibility(controlsShown ? View.VISIBLE : View.GONE);
                   h.removeCallbacks(hider);
-                  if (controlsShown && player != null && player.isPlaying()) h.postDelayed(hider, HIDE_MS);
+                  if (controlsShown) {
+                      updateBattery();
+                      if (player != null && player.isPlaying()) h.postDelayed(hider, HIDE_MS);
+                  }
                   immersive();
               }
 
@@ -1468,6 +2079,15 @@ jobs:
                       }
                       return true;
                   }
+                  sgd.onTouchEvent(e);
+                  if (e.getPointerCount() > 1 || gMode == G_ZOOM) {
+                      if (e.getActionMasked() == MotionEvent.ACTION_UP || e.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+                          gMode = G_NONE;
+                          h.removeCallbacks(centerHider);
+                          h.postDelayed(centerHider, 600);
+                      }
+                      return true;
+                  }
                   gd.onTouchEvent(e);
                   switch (e.getActionMasked()) {
                       case MotionEvent.ACTION_DOWN:
@@ -1477,9 +2097,11 @@ jobs:
                           seekTarget = -1;
                           startPos = player == null ? 0 : player.getCurrentPosition();
                           startVol = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+                          startBoost = boostMb;
                           startBright = currentBrightness();
                           break;
                       case MotionEvent.ACTION_MOVE: {
+                          if (speedHeld) break;
                           float dx = e.getX() - downX, dy = e.getY() - downY;
                           if (gMode == G_NONE) {
                               if (Math.abs(dx) > touchSlop * 2 && Math.abs(dx) > Math.abs(dy)) gMode = G_SEEK;
@@ -1495,11 +2117,16 @@ jobs:
                               long diff = seekTarget - startPos;
                               showCenter((diff >= 0 ? "+" : "-") + fmt(Math.abs(diff)) + "\n" + fmt(seekTarget) + " / " + fmt(d), 0);
                           } else if (gMode == G_VOLUME) {
+                              // skala 0..200%: di atas 100% memakai penguat suara
                               int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-                              int vol = Math.round(startVol + (-dy / (v.getHeight() * 0.6f)) * max);
-                              vol = Math.max(0, Math.min(max, vol));
+                              float startLevel = startVol + (startVol >= max ? (float) startBoost / MAX_BOOST_MB * max : 0);
+                              float level = startLevel + (-dy / (v.getHeight() * 0.6f)) * max;
+                              level = Math.max(0, Math.min(max * 2f, level));
+                              int vol = Math.min(max, Math.round(level));
                               am.setStreamVolume(AudioManager.STREAM_MUSIC, vol, 0);
-                              showCenter("Volume " + (max > 0 ? vol * 100 / max : 0) + "%", 0);
+                              setBoost(level > max ? Math.round((level - max) / max * MAX_BOOST_MB) : 0);
+                              int pct = max > 0 ? Math.round(level * 100 / max) : 0;
+                              showCenter("Volume " + pct + "%" + (pct > 100 ? " (diperkuat)" : ""), 0);
                           } else if (gMode == G_BRIGHT) {
                               float b = Math.max(0.01f, Math.min(1f, startBright + (-dy / (v.getHeight() * 0.6f))));
                               WindowManager.LayoutParams lp = getWindow().getAttributes();
@@ -1511,6 +2138,12 @@ jobs:
                       }
                       case MotionEvent.ACTION_UP:
                       case MotionEvent.ACTION_CANCEL:
+                          if (speedHeld) {
+                              speedHeld = false;
+                              if (player != null) player.setPlaybackSpeed(SPEEDS[speedIdx]);
+                              h.removeCallbacks(centerHider);
+                              h.postDelayed(centerHider, 300);
+                          }
                           if (gMode == G_SEEK && seekTarget >= 0 && player != null) player.seekTo(seekTarget);
                           if (gMode != G_NONE) {
                               h.removeCallbacks(centerHider);
@@ -1556,15 +2189,32 @@ jobs:
               }
 
               @Override
+              protected void onStart() {
+                  super.onStart();
+                  // Aplikasi dibuka kembali dari latar belakang dan PIN aktif: tutup pemutar dan minta PIN di layar utama.
+                  // Posisi video sudah disimpan, jadi bisa dilanjutkan dari tab Video saya.
+                  if (AppLock.needLock && PinLock.isSet(this) && !Intent.ACTION_VIEW.equals(getIntent().getAction())) {
+                      saveCurrent();
+                      if (player != null) player.pause();
+                      Intent i = new Intent(this, MainActivity.class);
+                      i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);   // kembali ke layar utama yang sudah ada
+                      startActivity(i);
+                      finish();
+                  }
+              }
+
+              @Override
               protected void onStop() {
                   super.onStop();
-                  savePos();
+                  saveCurrent();
                   if (player != null) player.pause();
               }
 
               @Override
               protected void onDestroy() {
                   h.removeCallbacksAndMessages(null);
+                  saveCurrent();
+                  releaseAudioEffects();
                   if (player != null) {
                       player.release();
                       player = null;
@@ -1594,12 +2244,19 @@ jobs:
           import android.content.pm.PackageInfo;
           import android.content.pm.PackageInstaller;
           import android.content.pm.PackageManager;
+          import android.content.pm.Signature;
           import android.os.Build;
 
           import org.json.JSONArray;
           import org.json.JSONObject;
 
+          import java.io.ByteArrayInputStream;
           import java.io.ByteArrayOutputStream;
+          import java.security.cert.CertificateFactory;
+          import java.security.cert.X509Certificate;
+          import java.util.ArrayList;
+          import java.util.Arrays;
+          import java.util.List;
           import java.io.File;
           import java.io.FileInputStream;
           import java.io.FileOutputStream;
@@ -1622,7 +2279,7 @@ jobs:
 
               static final class Info {
                   int build = -1;
-                  String tag, name, notes, apkUrl;
+                  String tag, name, notes, apkUrl, pageUrl;
                   long size = -1;
               }
 
@@ -1681,6 +2338,8 @@ jobs:
                   if (m.find()) i.build = Integer.parseInt(m.group(1));
                   i.name = o.optString("name", i.tag);
                   i.notes = o.optString("body", "");
+                  String page = o.optString("html_url", "");
+                  i.pageUrl = page.startsWith("https://github.com/") ? page : "https://github.com/" + repo + "/releases/latest";
                   JSONArray as = o.optJSONArray("assets");
                   if (as != null) {
                       for (int k = 0; k < as.length(); k++) {
@@ -1700,9 +2359,9 @@ jobs:
 
               /** Unduh APK ke folder cache aplikasi (privat, tidak perlu izin penyimpanan). */
               static File download(Context ctx, Info info, AtomicBoolean cancel, Progress p) throws IOException {
-                  File dir = new File(ctx.getCacheDir(), "update");
-                  if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("tidak bisa membuat folder sementara");
-                  File f = new File(dir, "update.apk");
+                  File f = ApkProvider.file(ctx);
+                  File dir = f.getParentFile();
+                  if (dir != null && !dir.isDirectory() && !dir.mkdirs()) throw new IOException("tidak bisa membuat folder sementara");
                   HttpURLConnection c = open(info.apkUrl);
                   boolean ok = false;
                   try {
@@ -1735,22 +2394,77 @@ jobs:
                   }
               }
 
-              /** Pastikan APK untuk aplikasi ini dan versinya lebih baru. null = aman dipasang. */
+              /** Dikembalikan verify() jika kunci tanda tangan APK baru berbeda dengan aplikasi terpasang. */
+              static final String KEY_MISMATCH = "Aplikasi yang terpasang ditandatangani dengan kunci lama (build 16 atau "
+                      + "sebelumnya), jadi Android menolak menimpanya. Hapus aplikasi ini sekali saja, lalu pasang APK "
+                      + "terbaru dari halaman unduhan. Setelah itu pembaruan dari dalam aplikasi akan berjalan.";
+
+              /** Pastikan APK untuk aplikasi ini, versinya lebih baru, dan kuncinya sama. null = aman dipasang. */
               @SuppressWarnings("deprecation")
               static String verify(Context ctx, File apk) {
                   try {
                       PackageManager pm = ctx.getPackageManager();
-                      PackageInfo arc = pm.getPackageArchiveInfo(apk.getPath(), 0);
+                      PackageInfo arc = pm.getPackageArchiveInfo(apk.getPath(), sigFlags());
                       if (arc == null) return "file APK rusak atau tidak lengkap";
                       if (!ctx.getPackageName().equals(arc.packageName)) return "APK bukan untuk aplikasi ini";
-                      PackageInfo cur = pm.getPackageInfo(ctx.getPackageName(), 0);
+                      PackageInfo cur = pm.getPackageInfo(ctx.getPackageName(), sigFlags());
                       long arcCode = Build.VERSION.SDK_INT >= 28 ? arc.getLongVersionCode() : arc.versionCode;
                       long curCode = Build.VERSION.SDK_INT >= 28 ? cur.getLongVersionCode() : cur.versionCode;
                       if (arcCode <= curCode) return "versi di GitHub tidak lebih baru dari yang terpasang";
+                      List<byte[]> a = signers(arc), c = signers(cur);
+                      // Jika kunci APK tidak terbaca (Android lama + APK skema v2), biarkan penginstal Android yang memutuskan.
+                      if (!a.isEmpty() && !c.isEmpty() && !sameSigner(a, c)) return KEY_MISMATCH;
                       return null;
                   } catch (Exception e) {
                       return "gagal memeriksa APK: " + e.getMessage();
                   }
+              }
+
+              @SuppressWarnings("deprecation")
+              static int sigFlags() {
+                  return Build.VERSION.SDK_INT >= 28 ? PackageManager.GET_SIGNING_CERTIFICATES : PackageManager.GET_SIGNATURES;
+              }
+
+              /** Sertifikat penanda tangan (termasuk riwayat rotasi kunci jika ada). */
+              @SuppressWarnings("deprecation")
+              static List<byte[]> signers(PackageInfo pi) {
+                  List<byte[]> out = new ArrayList<>();
+                  if (pi == null) return out;
+                  Signature[] sigs = null;
+                  if (Build.VERSION.SDK_INT >= 28) {
+                      if (pi.signingInfo != null) {
+                          sigs = pi.signingInfo.hasMultipleSigners() ? pi.signingInfo.getApkContentsSigners()
+                                  : pi.signingInfo.getSigningCertificateHistory();
+                      }
+                  } else {
+                      sigs = pi.signatures;
+                  }
+                  if (sigs != null) for (Signature s : sigs) if (s != null) out.add(s.toByteArray());
+                  return out;
+              }
+
+              static boolean sameSigner(List<byte[]> a, List<byte[]> b) {
+                  for (byte[] x : a) for (byte[] y : b) if (Arrays.equals(x, y)) return true;
+                  return false;
+              }
+
+              /** Nama pemilik sertifikat aplikasi yang terpasang (mis. "CN=Android Debug,..."), null jika tidak terbaca. */
+              static String installedSigner(Context ctx) {
+                  try {
+                      PackageInfo cur = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), sigFlags());
+                      List<byte[]> c = signers(cur);
+                      if (c.isEmpty()) return null;
+                      X509Certificate x = (X509Certificate) CertificateFactory.getInstance("X.509")
+                              .generateCertificate(new ByteArrayInputStream(c.get(c.size() - 1)));
+                      return x.getSubjectX500Principal().getName();
+                  } catch (Exception e) {
+                      return null;
+                  }
+              }
+
+              static boolean installedWithDebugKey(Context ctx) {
+                  String s = installedSigner(ctx);
+                  return s != null && s.contains("CN=Android Debug");
               }
 
               /** Serahkan APK ke penginstal Android. Hasilnya dikirim ke UpdateReceiver. */
@@ -1797,7 +2511,8 @@ jobs:
               static final String ACTION = "com.example.fcdownloader.UPDATE_STATUS";
 
               interface Listener {
-                  void onStatus(boolean ok, String msg);
+                  /** status = PackageInstaller.STATUS_*; msg sudah dalam bahasa pengguna, raw = pesan asli Android. */
+                  void onStatus(boolean ok, int status, String msg, String raw);
               }
 
               /** Diisi MainActivity selama tampil, agar hasilnya muncul di baris status. */
@@ -1815,13 +2530,14 @@ jobs:
                           try {
                               ctx.startActivity(confirm);
                           } catch (Exception e) {
-                              report(ctx, false, "Tidak bisa membuka layar pemasangan: " + e.getMessage());
+                              report(ctx, false, PackageInstaller.STATUS_FAILURE, "Tidak bisa membuka layar pemasangan.", e.getMessage());
                           }
                       }
                       return;
                   }
+                  String raw = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
                   if (st == PackageInstaller.STATUS_SUCCESS) {
-                      report(ctx, true, "Pembaruan terpasang.");
+                      report(ctx, true, st, "Pembaruan terpasang.", raw);
                       return;
                   }
                   String msg;
@@ -1832,17 +2548,18 @@ jobs:
                       msg = "Pemasangan pembaruan dibatalkan.";
                   } else if (st == PackageInstaller.STATUS_FAILURE_STORAGE) {
                       msg = "Penyimpanan HP penuh, pembaruan tidak bisa dipasang.";
+                  } else if (st == PackageInstaller.STATUS_FAILURE_BLOCKED) {
+                      msg = "Pemasangan diblokir oleh HP (mis. Play Protect atau pengaturan keamanan pabrikan).";
                   } else {
-                      String m = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
-                      msg = "Pembaruan gagal dipasang" + (m != null ? ": " + m : ".");
+                      msg = "Pembaruan gagal dipasang.";
                   }
-                  report(ctx, false, msg);
+                  report(ctx, false, st, msg, raw);
               }
 
-              static void report(Context ctx, boolean ok, String msg) {
+              static void report(Context ctx, boolean ok, int status, String msg, String raw) {
                   Listener l = listener;
-                  if (l != null) l.onStatus(ok, msg);
-                  else Toast.makeText(ctx.getApplicationContext(), msg, Toast.LENGTH_LONG).show();
+                  if (l != null) l.onStatus(ok, status, msg, raw);
+                  else Toast.makeText(ctx.getApplicationContext(), msg + (raw != null ? " (" + raw + ")" : ""), Toast.LENGTH_LONG).show();
               }
           }
           EOF_FILE
@@ -2116,6 +2833,246 @@ jobs:
           }
           EOF_FILE
 
+          cat > app/src/main/java/com/example/fcdownloader/ApkProvider.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.content.ContentProvider;
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.database.Cursor;
+          import android.database.MatrixCursor;
+          import android.net.Uri;
+          import android.os.ParcelFileDescriptor;
+          import android.provider.OpenableColumns;
+
+          import java.io.File;
+          import java.io.FileNotFoundException;
+
+          /**
+           * Membagikan SATU file saja (APK pembaruan di cache aplikasi) ke penginstal APK bawaan Android,
+           * sebagai jalur cadangan jika pemasangan lewat PackageInstaller ditolak HP (mis. MIUI).
+           * Tidak di-export: penginstal hanya bisa membacanya lewat izin sementara (FLAG_GRANT_READ_URI_PERMISSION).
+           */
+          public class ApkProvider extends ContentProvider {
+
+              static final String NAME = "update.apk";
+              static final String MIME = "application/vnd.android.package-archive";
+
+              static Uri uri(Context c) {
+                  return Uri.parse("content://" + c.getPackageName() + ".apk/" + NAME);
+              }
+
+              static File file(Context c) {
+                  return new File(new File(c.getCacheDir(), "update"), NAME);
+              }
+
+              @Override
+              public boolean onCreate() {
+                  return true;
+              }
+
+              @Override
+              public String getType(Uri uri) {
+                  return MIME;
+              }
+
+              @Override
+              public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+                  if (!NAME.equals(uri.getLastPathSegment()) || !"r".equals(mode) || getContext() == null) {
+                      throw new FileNotFoundException("tidak tersedia");
+                  }
+                  return ParcelFileDescriptor.open(file(getContext()), ParcelFileDescriptor.MODE_READ_ONLY);
+              }
+
+              @Override
+              public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) {
+                  if (!NAME.equals(uri.getLastPathSegment()) || getContext() == null) return null;
+                  MatrixCursor c = new MatrixCursor(new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE});
+                  c.addRow(new Object[]{"FilecosterDownloader.apk", file(getContext()).length()});
+                  return c;
+              }
+
+              @Override
+              public Uri insert(Uri uri, ContentValues values) {
+                  return null;
+              }
+
+              @Override
+              public int delete(Uri uri, String selection, String[] args) {
+                  return 0;
+              }
+
+              @Override
+              public int update(Uri uri, ContentValues values, String selection, String[] args) {
+                  return 0;
+              }
+          }
+          EOF_FILE
+
+          cat > app/src/main/java/com/example/fcdownloader/WatchStore.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.json.JSONObject;
+
+          import java.util.Map;
+
+          /**
+           * Status tonton per video (seperti VLC): posisi terakhir, durasi, sudah selesai atau belum,
+           * dan kapan terakhir diputar. Dipakai pemutar (melanjutkan) dan tab Pemutar (penanda).
+           */
+          final class WatchStore {
+
+              static final long MIN_RESUME_MS = 5000;
+              static final int MAX_ENTRIES = 1000;
+
+              static final class Entry {
+                  long pos, dur, time;
+                  boolean done;
+
+                  /** 0..100, atau -1 jika durasi belum diketahui. */
+                  int percent() {
+                      if (done) return 100;
+                      return dur > 0 ? (int) Math.min(100, pos * 100 / dur) : -1;
+                  }
+
+                  boolean resumable() {
+                      return !done && pos > MIN_RESUME_MS && (dur <= 0 || pos < dur - MIN_RESUME_MS);
+                  }
+              }
+
+              private WatchStore() { }
+
+              static SharedPreferences store(Context c) {
+                  return c.getSharedPreferences("watch", Context.MODE_PRIVATE);
+              }
+
+              static Entry get(Context c, String uri) {
+                  if (uri == null) return null;
+                  String s = store(c).getString(uri, null);
+                  if (s == null) return null;
+                  try {
+                      JSONObject o = new JSONObject(s);
+                      Entry e = new Entry();
+                      e.pos = o.optLong("pos");
+                      e.dur = o.optLong("dur");
+                      e.time = o.optLong("t");
+                      e.done = o.optBoolean("done");
+                      return e;
+                  } catch (Exception ex) {
+                      return null;
+                  }
+              }
+
+              /** Simpan posisi. Dianggap selesai jika sisa kurang dari 5 detik atau 3% durasi. */
+              static void save(Context c, String uri, long pos, long dur) {
+                  if (uri == null || pos < 0) return;
+                  boolean done = dur > 0 && pos >= dur - Math.max(MIN_RESUME_MS, dur * 3 / 100);
+                  put(c, uri, done ? 0 : pos, dur, done);
+              }
+
+              static void setDone(Context c, String uri, boolean done) {
+                  Entry e = get(c, uri);
+                  if (done) put(c, uri, 0, e == null ? 0 : e.dur, true);
+                  else store(c).edit().remove(uri).apply();
+              }
+
+              static void put(Context c, String uri, long pos, long dur, boolean done) {
+                  try {
+                      JSONObject o = new JSONObject();
+                      o.put("pos", pos);
+                      o.put("dur", dur);
+                      o.put("done", done);
+                      o.put("t", System.currentTimeMillis());
+                      SharedPreferences sp = store(c);
+                      SharedPreferences.Editor ed = sp.edit().putString(uri, o.toString());
+                      Map<String, ?> all = sp.getAll();
+                      if (all.size() > MAX_ENTRIES) {          // buang catatan paling lama
+                          String oldest = null;
+                          long ot = Long.MAX_VALUE;
+                          for (Map.Entry<String, ?> en : all.entrySet()) {
+                              try {
+                                  long t = new JSONObject(String.valueOf(en.getValue())).optLong("t");
+                                  if (t < ot) {
+                                      ot = t;
+                                      oldest = en.getKey();
+                                  }
+                              } catch (Exception ignored) { }
+                          }
+                          if (oldest != null && !oldest.equals(uri)) ed.remove(oldest);
+                      }
+                      ed.apply();
+                  } catch (Exception ignored) { }
+              }
+          }
+          EOF_FILE
+
+          cat > app/src/main/java/com/example/fcdownloader/AppLock.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.app.Activity;
+          import android.app.Application;
+          import android.os.Bundle;
+
+          /**
+           * Mendeteksi kapan aplikasi ditinggalkan (semua layar aplikasi tidak terlihat lagi). Saat aplikasi
+           * dibuka kembali, PIN harus dimasukkan lagi (ditangani MainActivity; PlayerActivity mengalihkan ke sana).
+           * Berpindah antar layar di dalam aplikasi (mis. ke pemutar) tidak dihitung sebagai meninggalkan aplikasi.
+           */
+          final class AppLock {
+
+              static int started;
+              static boolean registered;
+              static volatile boolean needLock, external;
+
+              private AppLock() { }
+
+              static void install(Application app) {
+                  if (registered) return;
+                  registered = true;
+                  app.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+                      @Override
+                      public void onActivityStarted(Activity a) {
+                          started++;
+                      }
+
+                      @Override
+                      public void onActivityStopped(Activity a) {
+                          started = Math.max(0, started - 1);
+                          if (started == 0 && !a.isChangingConfigurations()) {
+                              // Disengaja: membuka pemilih file / penginstal / browser dari dalam aplikasi tidak
+                              // memicu PIN saat kembali (lihat expectExternal). Selain itu PIN selalu diminta lagi.
+                              if (external) external = false;
+                              else needLock = true;
+                          }
+                      }
+
+                      @Override
+                      public void onActivityCreated(Activity a, Bundle b) { }
+
+                      @Override
+                      public void onActivityResumed(Activity a) { }
+
+                      @Override
+                      public void onActivityPaused(Activity a) { }
+
+                      @Override
+                      public void onActivitySaveInstanceState(Activity a, Bundle b) { }
+
+                      @Override
+                      public void onActivityDestroyed(Activity a) { }
+                  });
+              }
+
+              /** Dipanggil tepat sebelum aplikasi sendiri membuka aplikasi lain (pemilih file, penginstal, browser). */
+              static void expectExternal() {
+                  external = true;
+              }
+          }
+          EOF_FILE
+
           cat > app/src/main/java/com/example/fcdownloader/HlsDownloader.java << 'EOF_FILE'
           package com.example.fcdownloader;
 
@@ -2192,6 +3149,7 @@ jobs:
               final AtomicBoolean cancel;
               final Listener ls;
               final Map<String, byte[]> keys = new HashMap<>();
+              long chosenBandwidth = -1;     // BANDWIDTH varian yang dipilih pickVariant
 
               HlsDownloader(String ua, String referer, AtomicBoolean cancel, Listener ls) {
                   this.ua = ua;
@@ -2322,6 +3280,59 @@ jobs:
                   return r;
               }
 
+              /**
+               * Perkiraan ukuran & durasi stream sebelum diunduh: {byte, milidetik}, -1 jika tidak diketahui.
+               * Ukuran = BANDWIDTH kualitas terpilih x durasi; tanpa BANDWIDTH: ukuran potongan pertama x jumlah potongan.
+               * Dipanggil di thread latar belakang.
+               */
+              static long[] estimate(String url, String ua, String referer) {
+                  long[] out = {-1, -1};
+                  try {
+                      HlsDownloader d = new HlsDownloader(ua, referer, new AtomicBoolean(false), new Listener() {
+                          @Override
+                          public void onProgress(int done, int total, long bytes) { }
+
+                          @Override
+                          public void onLog(String s) { }
+                      });
+                      String cur = url;
+                      String text = new String(d.fetch(cur, -1, -1, MAX_PLAYLIST), StandardCharsets.UTF_8);
+                      long bw = -1;
+                      for (int hop = 0; hop < 3 && text.contains("#EXT-X-STREAM-INF"); hop++) {
+                          String next = d.pickVariant(text, cur);
+                          if (next == null) return out;
+                          bw = d.chosenBandwidth;
+                          cur = next;
+                          text = new String(d.fetch(cur, -1, -1, MAX_PLAYLIST), StandardCharsets.UTF_8);
+                      }
+                      double secs = 0;
+                      int count = 0;
+                      String first = null;
+                      for (String raw : text.split("\\r?\\n")) {
+                          String line = raw.trim();
+                          if (line.startsWith("#EXTINF:")) {
+                              String v = line.substring(8);
+                              int c = v.indexOf(',');
+                              try {
+                                  secs += Double.parseDouble((c >= 0 ? v.substring(0, c) : v).trim());
+                              } catch (NumberFormatException ignored) { }
+                          } else if (!line.isEmpty() && !line.startsWith("#")) {
+                              count++;
+                              if (first == null) first = resolve(cur, line);
+                          }
+                      }
+                      if (secs > 0) out[1] = (long) (secs * 1000);
+                      if (bw > 0 && secs > 0) {
+                          out[0] = (long) (bw / 8.0 * secs);
+                      } else if (first != null && count > 0) {
+                          long one = MainActivity.probeSize(first, referer, ua, CookieManager.getInstance().getCookie(first));
+                          if (one > 0) out[0] = one * count;
+                      }
+                  } catch (Exception ignored) {
+                      // ukuran tidak diketahui: tetap bisa diunduh
+                  }
+                  return out;
+              }
               byte[] segment(Seg s) throws Exception {
                   byte[] d = fetchRetry(s.url, s.off, s.len);
                   if (s.keyUri == null) return d;
@@ -2418,6 +3429,7 @@ jobs:
                       }
                   }
                   if (audioSplit) ls.onLog("perhatian: audio stream ini terpisah, hasil unduhan mungkin tanpa suara");
+                  chosenBandwidth = bestBw;
                   if (best != null) ls.onLog("kualitas dipilih: " + (bestBw > 0 ? (bestBw / 1000) + " kbps" : "default"));
                   return best;
               }
@@ -2831,6 +3843,7 @@ jobs:
 
               // pemutar: file hasil unduhan yang sudah selesai (indeks video -> uri) + daftar video di HP
               final Map<Integer, String> doneUri = new HashMap<>();
+              final Map<Integer, Long> rSizes = new HashMap<>();   // ukuran link yang sudah terkumpul (sebelum diunduh)
               static final int MAX_LIBRARY = 150;
               static final int REQ_OPEN_FILE = 5;
               static final int MAX_DOWNLOADS = 500;
@@ -2856,6 +3869,16 @@ jobs:
               String pinFirst;
               boolean decoy, locked;
               long stoppedAt;
+
+              // tampilan baru: tiga halaman dengan navigasi bawah
+              static final int PAGE_HOME = 0, PAGE_VIDEOS = 1, PAGE_MORE = 2;
+              LinearLayout pageHome, pageVideos, pageMore, progressCard, listCard, recentCard, recentBox, advancedBody;
+              TextView navHome, navMore, logChevron;
+              int currentPage, sniffPolls;
+              Spinner libFilterSpin, libSortSpin;
+              final List<Integer> libView = new ArrayList<>();
+              static final String[] LIB_FILTERS = {"Semua video", "Belum ditonton", "Sedang ditonton", "Sudah ditonton"};
+              static final String[] LIB_SORTS = {"Terbaru diunduh", "Terakhir ditonton", "Nama (A-Z)", "Ukuran terbesar"};
               Intent pendingShare;
 
               // pembaruan aplikasi
@@ -2864,12 +3887,13 @@ jobs:
               TextView updateTitle, updateNotes, updateBtn, updateCheckBtn, versionInfo;
               CheckBox autoUpdateBox;
               Updater.Info pendingUpdate;
-              boolean updChecking, updBusy;
+              boolean updChecking, updBusy, updReinstall, updFallbackTried;
               AtomicBoolean updCancel;
 
               @Override
               protected void onCreate(Bundle b) {
                   super.onCreate(b);
+                  AppLock.install(getApplication());
                   buildUi();
                   setupWebView();
                   KeepAliveService.stopHook = () -> {
@@ -2881,22 +3905,20 @@ jobs:
                       requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 2);
                   }
                   loadingPrefs = false;
-                  setStatus("Siap. Tempel link folder untuk mulai.", Ui.MUTED);
+                  setStatus("Tempel link video, lalu tekan Cari video.", Ui.MUTED);
                   buildRows();
                   showTab(0);
                   renderHistory();
                   refreshUi();
                   if (PinLock.isSet(this)) {
+                      AppLock.needLock = false;
                       showLock(PIN_UNLOCK);
                   } else if (!prefs.getBoolean("pinAsked", false)) {
                       showLock(PIN_NEW);          // tawarkan membuat PIN pada pembukaan pertama (bisa dilewati)
                   }
                   updatePinUi();
                   if (b == null) handleShare(getIntent());
-                  UpdateReceiver.listener = (okInstall, msg) -> h.post(() -> {
-                      setStatus(msg, okInstall ? Ui.ION : Ui.PULSE);
-                      if (!okInstall && updateBtn != null) updateBtn.setText("Coba lagi");
-                  });
+                  UpdateReceiver.listener = (okInstall, status, msg, raw) -> h.post(() -> onInstallResult(okInstall, status, msg, raw));
                   // Pemeriksaan pembaruan otomatis paling sering 12 jam sekali (bisa dimatikan di Pengaturan).
                   if (autoUpdateBox.isChecked()
                           && System.currentTimeMillis() - prefs.getLong("updLast", 0) > UPDATE_CHECK_EVERY_MS) {
@@ -2940,21 +3962,28 @@ jobs:
                   getWindow().setBackgroundDrawable(new ColorDrawable(Ui.ABYSS));
                   final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT, WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
 
+                  // ===== tiga halaman: Unduh, Video saya, Lainnya =====
                   LinearLayout root = Ui.col(this);
-                  root.setPadding(dp(16), dp(14), dp(16), dp(32));
+                  root.setPadding(dp(16), dp(14), dp(16), dp(24));
+                  pageHome = Ui.col(this);
+                  pageVideos = Ui.col(this);
+                  pageMore = Ui.col(this);
+                  root.addView(pageHome);
+                  root.addView(pageVideos);
+                  root.addView(pageMore);
 
-                  // kepala
+                  // ---------- HALAMAN UNDUH ----------
                   LinearLayout head = Ui.row(this);
                   LinearLayout titles = Ui.col(this);
                   TextView appName = Ui.text(this, "Filecoster", 28, Ui.TEXT, Ui.DISPLAY);
                   appName.setLetterSpacing(0.03f);
                   titles.addView(appName);
-                  titles.addView(Ui.text(this, "Pengunduh video & folder", 13, Ui.MUTED, Ui.BODY));
+                  titles.addView(Ui.text(this, "Unduh video dari link apa pun", 13, Ui.MUTED, Ui.BODY));
                   head.addView(titles, Ui.weight(1));
-                  darkBtn = Ui.ghost(this, "Layar gelap");
+                  darkBtn = Ui.ghost(this, "\u263E Gelap");
                   darkBtn.setTextSize(13);
                   head.addView(darkBtn);
-                  root.addView(head);
+                  pageHome.addView(head);
 
                   // kartu pembaruan (muncul jika ada versi baru di GitHub)
                   updateCard = Ui.card(this, true);
@@ -2965,39 +3994,15 @@ jobs:
                   updateBtn = Ui.primary(this, "Unduh & pasang");
                   updateCard.addView(updateBtn, Ui.fill(this, 12));
                   updateCard.setVisibility(View.GONE);
-                  root.addView(updateCard, Ui.fill(this, 12));
+                  pageHome.addView(updateCard, Ui.fill(this, 12));
 
-                  // baris status
-                  LinearLayout srow = Ui.row(this);
-                  statusDot = new View(this);
-                  srow.addView(statusDot, new LinearLayout.LayoutParams(dp(8), dp(8)));
-                  statusText = Ui.text(this, "", 14, Ui.TEXT, Ui.BODY);
-                  statusText.setPadding(dp(10), 0, 0, 0);
-                  srow.addView(statusText, Ui.weight(1));
-                  root.addView(srow, Ui.fill(this, 16));
-
-                  // cincin pemindai + angka
-                  LinearLayout dash = Ui.card(this, true);
-                  dash.setGravity(Gravity.CENTER_HORIZONTAL);
-                  ring = new RingView(this);
-                  LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(WRAP, WRAP);
-                  rp.gravity = Gravity.CENTER_HORIZONTAL;
-                  dash.addView(ring, rp);
-                  LinearLayout stats = Ui.row(this);
-                  statFolders = stat(stats, "folder");
-                  statVideos = stat(stats, "video");
-                  statDone = stat(stats, "selesai");
-                  statFail = stat(stats, "gagal");
-                  dash.addView(stats, Ui.fill(this, 12));
-                  root.addView(dash, Ui.fill(this, 12));
-
-                  // link + tombol utama
-                  LinearLayout linkCard = Ui.card(this, false);
-                  linkCard.addView(Ui.title(this, "Link"));
-                  linkCard.addView(Ui.hint(this, "Tempel link folder untuk dipindai, link satu video untuk diunduh langsung, "
-                          + "atau link halaman apa pun lalu tekan Buka & deteksi video (seperti IDM)."), Ui.fill(this, 2));
+                  // kartu utama: tempel link -> Cari video
+                  LinearLayout linkCard = Ui.card(this, true);
+                  linkCard.addView(Ui.title(this, "Tempel link video"));
+                  linkCard.addView(Ui.hint(this, "Salin link dari browser atau aplikasi lain, tempel di sini, lalu tekan Cari video."),
+                          Ui.fill(this, 2));
                   LinearLayout lrow = Ui.row(this);
-                  urlInput = Ui.input(this, "https://filecoster.com/...");
+                  urlInput = Ui.input(this, "https://...");
                   urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
                   // jika PIN aktif, link terakhir baru diisi setelah PIN dimasukkan (lihat applyProfile)
                   urlInput.setText(PinLock.isSet(this) ? "" : prefs.getString("url", ""));
@@ -3007,167 +4012,58 @@ jobs:
                   pl.leftMargin = dp(8);
                   lrow.addView(pasteBtn, pl);
                   linkCard.addView(lrow, Ui.fill(this, 12));
-                  mainBtn = Ui.primary(this, "Pindai folder");
-                  linkCard.addView(mainBtn, Ui.fill(this, 14));
-                  singleBtn = Ui.ghost(this, "Unduh langsung (satu video)");
-                  linkCard.addView(singleBtn, Ui.fill(this, 8));
-                  browseBtn = Ui.ghost(this, "Buka & deteksi video (seperti IDM)");
-                  linkCard.addView(browseBtn, Ui.fill(this, 8));
+                  browseBtn = Ui.primary(this, "\uD83D\uDD0D  Cari video");
+                  linkCard.addView(browseBtn, Ui.fill(this, 14));
+                  mainBtn = Ui.primary(this, "Unduh semua video dari link folder");
+                  linkCard.addView(mainBtn, Ui.fill(this, 8));
                   secBtn = Ui.ghost(this, "Pindai ulang");
                   linkCard.addView(secBtn, Ui.fill(this, 8));
-                  root.addView(linkCard, Ui.fill(this, 12));
+                  singleBtn = Ui.ghost(this, "Unduh langsung (satu video)");
+                  singleBtn.setVisibility(View.GONE);         // digantikan oleh Cari video
+                  linkCard.addView(singleBtn, Ui.fill(this, 8));
+                  // baris status
+                  LinearLayout srow = Ui.row(this);
+                  statusDot = new View(this);
+                  srow.addView(statusDot, new LinearLayout.LayoutParams(dp(8), dp(8)));
+                  statusText = Ui.text(this, "", 14, Ui.TEXT, Ui.BODY);
+                  statusText.setPadding(dp(10), 0, 0, 0);
+                  srow.addView(statusText, Ui.weight(1));
+                  linkCard.addView(srow, Ui.fill(this, 14));
+                  pageHome.addView(linkCard, Ui.fill(this, 14));
 
-                  // pengaturan (bisa dilipat)
-                  LinearLayout set = Ui.card(this, false);
-                  LinearLayout shead = Ui.row(this);
-                  LinearLayout st = Ui.col(this);
-                  st.addView(Ui.title(this, "Pengaturan"));
-                  settingsSummary = Ui.hint(this, "");
-                  st.addView(settingsSummary, Ui.fill(this, 2));
-                  shead.addView(st, Ui.weight(1));
-                  settingsChevron = Ui.text(this, "\u25BE", 20, Ui.MUTED, Ui.BODY);
-                  settingsChevron.setPadding(dp(12), 0, dp(4), 0);
-                  shead.addView(settingsChevron);
-                  shead.setClickable(true);
-                  set.addView(shead);
-                  settingsBody = Ui.col(this);
-                  settingsBody.setVisibility(View.GONE);
+                  // link terakhir (hanya saat belum ada pekerjaan)
+                  recentCard = Ui.card(this, false);
+                  recentCard.addView(Ui.text(this, "Terakhir dibuka", 14, Ui.MUTED, Ui.MEDIUM));
+                  recentBox = Ui.col(this);
+                  recentCard.addView(recentBox, Ui.fill(this, 6));
+                  recentCard.setVisibility(View.GONE);
+                  pageHome.addView(recentCard, Ui.fill(this, 12));
 
-                  settingsBody.addView(section("Layar mati"), Ui.fill(this, 18));
-                  keepBox = Ui.check(this, "Tetap berjalan saat layar dimatikan", prefs.getBoolean("keep", true));
-                  settingsBody.addView(keepBox, Ui.fill(this, 4));
-                  TextView keepHint = Ui.hint(this, "Aplikasi menahan CPU dan Wi-Fi tetap aktif lewat notifikasi, "
-                          + "jadi kamu boleh menekan tombol power.");
-                  keepHint.setPadding(dp(32), 0, 0, 0);
-                  settingsBody.addView(keepHint);
-                  LinearLayout brow = Ui.row(this);
-                  batteryStatus = Ui.hint(this, "");
-                  brow.addView(batteryStatus, Ui.weight(1));
-                  batteryBtn = Ui.ghost(this, "Izinkan");
-                  batteryBtn.setTextSize(13);
-                  brow.addView(batteryBtn);
-                  settingsBody.addView(brow, Ui.fill(this, 10));
+                  // kemajuan (hanya saat bekerja / ada daftar)
+                  progressCard = Ui.card(this, false);
+                  progressCard.setGravity(Gravity.CENTER_HORIZONTAL);
+                  ring = new RingView(this);
+                  LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  rp.gravity = Gravity.CENTER_HORIZONTAL;
+                  progressCard.addView(ring, rp);
+                  LinearLayout stats = Ui.row(this);
+                  statFolders = stat(stats, "folder");
+                  statVideos = stat(stats, "video");
+                  statDone = stat(stats, "selesai");
+                  statFail = stat(stats, "gagal");
+                  progressCard.addView(stats, Ui.fill(this, 12));
+                  progressCard.setVisibility(View.GONE);
+                  pageHome.addView(progressCard, Ui.fill(this, 12));
 
-                  settingsBody.addView(section("Pencarian video"), Ui.fill(this, 22));
-                  fastBox = Ui.check(this, "Unduh langsung saat video siap diputar", prefs.getBoolean("fast", true));
-                  settingsBody.addView(fastBox, Ui.fill(this, 4));
-                  TextView fastHint = Ui.hint(this, "Begitu video asli siap diputar, alamatnya langsung diambil dan "
-                          + "unduhan dimulai, tanpa menunggu 10 detik. Matikan jika sering salah mengambil iklan.");
-                  fastHint.setPadding(dp(32), 0, 0, 0);
-                  settingsBody.addView(fastHint);
-
-                  settingsBody.addView(section("Performa HP"), Ui.fill(this, 22));
-                  deviceInfo = Ui.hint(this, profile.describe());
-                  settingsBody.addView(deviceInfo, Ui.fill(this, 6));
-                  settingsBody.addView(label("Pengumpulan link bersamaan"), Ui.fill(this, 12));
-                  colSpin = Ui.spinner(this, colNames());
-                  colSpin.setSelection(Math.max(0, Math.min(MAX_COLLECT, prefs.getInt("col", 0))));
-                  settingsBody.addView(colSpin, Ui.fill(this, 6));
-                  colHint = Ui.hint(this, "");
-                  settingsBody.addView(colHint, Ui.fill(this, 8));
-                  recBtn = Ui.ghost(this, "Pakai rekomendasi untuk HP ini");
-                  recBtn.setTextSize(13);
-                  settingsBody.addView(recBtn, Ui.fill(this, 10));
-                  darkWebBox = Ui.check(this, "Sembunyikan tampilan web (layar web gelap)", prefs.getBoolean("darkweb", false));
-                  settingsBody.addView(darkWebBox, Ui.fill(this, 14));
-                  TextView darkHint = Ui.hint(this, "Halaman web tetap dibuka, diputar, dan dibaca seperti biasa. Hanya gambarnya "
-                          + "ditutup layar hitam, jadi tidak ada yang perlu dilihat. Matikan jika video sering gagal tertangkap.");
-                  darkHint.setPadding(dp(32), 0, 0, 0);
-                  settingsBody.addView(darkHint);
-
-                  settingsBody.addView(section("Unduhan"), Ui.fill(this, 22));
-                  autoBox = Ui.check(this, "Mulai unduh otomatis setelah semua link terkumpul", prefs.getBoolean("auto", true));
-                  settingsBody.addView(autoBox, Ui.fill(this, 4));
-                  settingsBody.addView(label("Unduhan bersamaan"), Ui.fill(this, 10));
-                  parSpin = Ui.spinner(this, parNames());
-                  parSpin.setSelection(Math.max(0, Math.min(PAR_VALUES.length - 1,
-                          prefs.getInt("par", indexOfPar(profile.recDownload)))));
-                  settingsBody.addView(parSpin, Ui.fill(this, 6));
-                  settingsBody.addView(Ui.hint(this, "Tahap 1 mengumpulkan semua link dulu, baru tahap 2 mengunduhnya. "
-                          + "Angka kecil lebih aman jika server membatasi koneksi."), Ui.fill(this, 8));
-
-                  settingsBody.addView(section("Pemindaian"), Ui.fill(this, 22));
-                  subBox = Ui.check(this, "Ikut pindai subfolder (folder di dalam folder)", prefs.getBoolean("sub", true));
-                  settingsBody.addView(subBox, Ui.fill(this, 4));
-                  adBox = Ui.check(this, "Blokir iklan", prefs.getBoolean("ads", true));
-                  adBlock = adBox.isChecked();
-                  settingsBody.addView(adBox);
-                  TextView adHint = Ui.hint(this, "Matikan jika halaman Filecoster tidak mau terbuka.");
-                  adHint.setPadding(dp(32), 0, 0, 0);
-                  settingsBody.addView(adHint);
-                  dnsBox = Ui.check(this, "Pakai DNS Google (8.8.8.8) untuk halaman web", prefs.getBoolean("dns", true));
-                  Net.enabled = dnsBox.isChecked();
-                  settingsBody.addView(dnsBox, Ui.fill(this, 4));
-                  TextView dnsHint = Ui.hint(this, "Halaman dibuka lewat DNS Google (DNS-over-HTTPS), jadi situs yang diblokir lewat DNS "
-                          + "provider tetap bisa terbuka. Matikan jika halaman jadi lambat atau tidak mau terbuka.");
-                  dnsHint.setPadding(dp(32), 0, 0, 0);
-                  settingsBody.addView(dnsHint);
-
-                  settingsBody.addView(section("Penyimpanan"), Ui.fill(this, 20));
-                  settingsBody.addView(label("Lokasi"), Ui.fill(this, 8));
-                  LinearLayout frow = Ui.row(this);
-                  baseSpin = Ui.spinner(this, BASE_NAMES);
-                  baseSpin.setSelection(Math.max(0, Math.min(BASE_NAMES.length - 1, prefs.getInt("base", 0))));
-                  frow.addView(baseSpin, Ui.weight(1));
-                  TextView slash = Ui.text(this, "/", 18, Ui.MUTED, Ui.BODY);
-                  slash.setPadding(dp(10), 0, dp(10), 0);
-                  frow.addView(slash);
-                  folderInput = Ui.input(this, "nama folder");
-                  folderInput.setText(prefs.getString("folder", "Filecoster"));
-                  frow.addView(folderInput, Ui.weight(1.4f));
-                  settingsBody.addView(frow, Ui.fill(this, 6));
-                  settingsBody.addView(label("Susunan folder"), Ui.fill(this, 14));
-                  saveSpin = Ui.spinner(this, SAVE_MODES);
-                  saveSpin.setSelection(Math.max(0, Math.min(SAVE_MODES.length - 1, prefs.getInt("save", 0))));
-                  settingsBody.addView(saveSpin, Ui.fill(this, 6));
-                  destPreview = Ui.hint(this, "");
-                  settingsBody.addView(destPreview, Ui.fill(this, 8));
-
-                  settingsBody.addView(section("Kunci PIN"), Ui.fill(this, 20));
-                  pinInfo = Ui.hint(this, "");
-                  settingsBody.addView(pinInfo, Ui.fill(this, 6));
-                  LinearLayout pinRow = Ui.row(this);
-                  pinSetBtn = Ui.ghost(this, "Atur PIN");
-                  pinSetBtn.setTextSize(13);
-                  pinRow.addView(pinSetBtn, Ui.weight(1));
-                  pinOffBtn = Ui.ghost(this, "Matikan PIN");
-                  pinOffBtn.setTextSize(13);
-                  pinOffBtn.setTextColor(Ui.PULSE);
-                  LinearLayout.LayoutParams pol = Ui.weight(1);
-                  pol.leftMargin = dp(8);
-                  pinRow.addView(pinOffBtn, pol);
-                  settingsBody.addView(pinRow, Ui.fill(this, 8));
-
-                  settingsBody.addView(section("Pembaruan aplikasi"), Ui.fill(this, 20));
-                  versionInfo = Ui.hint(this, "Versi terpasang: " + BuildConfig.VERSION_NAME);
-                  settingsBody.addView(versionInfo, Ui.fill(this, 6));
-                  autoUpdateBox = Ui.check(this, "Periksa pembaruan otomatis saat aplikasi dibuka", prefs.getBoolean("autoupd", true));
-                  settingsBody.addView(autoUpdateBox, Ui.fill(this, 4));
-                  updateCheckBtn = Ui.ghost(this, "Periksa pembaruan sekarang");
-                  updateCheckBtn.setTextSize(13);
-                  settingsBody.addView(updateCheckBtn, Ui.fill(this, 8));
-
-                  settingsBody.addView(section("Lanjutan"), Ui.fill(this, 20));
-                  settingsBody.addView(Ui.hint(this, "Isi hanya jika video atau subfolder tidak terdeteksi. "
-                          + "Masukkan bagian khas dari link-nya, misalnya /watch/ atau /folder/."), Ui.fill(this, 4));
-                  patternInput = Ui.input(this, "Pola link video");
-                  patternInput.setText(prefs.getString("pat", ""));
-                  settingsBody.addView(patternInput, Ui.fill(this, 10));
-                  folderPatternInput = Ui.input(this, "Pola link folder");
-                  folderPatternInput.setText(prefs.getString("fpat", ""));
-                  settingsBody.addView(folderPatternInput, Ui.fill(this, 8));
-                  set.addView(settingsBody);
-                  root.addView(set, Ui.fill(this, 12));
-
-                  // pratinjau web
+                  // halaman web (browser dalam aplikasi)
                   LinearLayout prev = Ui.card(this, false);
                   LinearLayout phead = Ui.row(this);
                   LinearLayout pt = Ui.col(this);
-                  pt.addView(Ui.title(this, "Pratinjau langsung"));
-                  pt.addView(Ui.hint(this, "Tiap video dibuka dan diputar di sini. Jangan disentuh selama proses berjalan."),
+                  pt.addView(Ui.title(this, "Halaman web"));
+                  pt.addView(Ui.hint(this, "Video di halaman ini dicari otomatis. Jika belum ketemu, tekan tombol play pada videonya."),
                           Ui.fill(this, 2));
                   phead.addView(pt, Ui.weight(1));
-                  previewToggle = Ui.ghost(this, "Tampilkan");
+                  previewToggle = Ui.ghost(this, "Tutup");
                   previewToggle.setTextSize(13);
                   LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(WRAP, WRAP);
                   tl.leftMargin = dp(10);
@@ -3194,18 +4090,18 @@ jobs:
                   stage = new FrameLayout(this);
                   stageCover = darkCover();
                   prevCard = prev;
-                  root.addView(prev, Ui.fill(this, 12));
+                  prev.setVisibility(View.GONE);
+                  pageHome.addView(prev, Ui.fill(this, 12));
 
-                  // video yang terdeteksi saat menjelajah (mode IDM)
-                  sniffCard = Ui.card(this, false);
+                  // video yang ditemukan di halaman (mode IDM)
+                  sniffCard = Ui.card(this, true);
                   LinearLayout sh = Ui.row(this);
                   LinearLayout stc = Ui.col(this);
-                  sniffTitle = Ui.title(this, "Video terdeteksi");
+                  sniffTitle = Ui.title(this, "Video ditemukan");
                   stc.addView(sniffTitle);
-                  stc.addView(Ui.hint(this, "Putar videonya di pratinjau. Setiap video yang dimuat halaman muncul di sini, "
-                          + "tekan Unduh. Boleh pindah halaman sesukamu."), Ui.fill(this, 2));
+                  stc.addView(Ui.hint(this, "Tekan Unduh untuk menyimpan, atau Putar untuk menonton tanpa mengunduh."), Ui.fill(this, 2));
                   sh.addView(stc, Ui.weight(1));
-                  sniffCloseBtn = Ui.ghost(this, "Tutup");
+                  sniffCloseBtn = Ui.ghost(this, "Selesai");
                   sniffCloseBtn.setTextSize(13);
                   LinearLayout.LayoutParams scl = new LinearLayout.LayoutParams(WRAP, WRAP);
                   scl.leftMargin = dp(10);
@@ -3214,53 +4110,35 @@ jobs:
                   sniffBox = Ui.col(this);
                   sniffCard.addView(sniffBox, Ui.fill(this, 8));
                   sniffCard.setVisibility(View.GONE);
-                  root.addView(sniffCard, Ui.fill(this, 12));
+                  pageHome.addView(sniffCard, Ui.fill(this, 12));
 
-                  // tab daftar video / catatan
-                  LinearLayout tabs = Ui.row(this);
-                  tabs.setBackground(Ui.box(this, Ui.PANEL, 12, 0));
-                  tabs.setPadding(dp(4), dp(4), dp(4), dp(4));
-                  tabVideos = tab("Video");
-                  tabLog = tab("Catatan");
-                  tabHistory = tab("Riwayat");
-                  tabPlayer = tab("Pemutar");
-                  tabs.addView(tabVideos, Ui.weight(1));
-                  tabs.addView(tabLog, Ui.weight(1));
-                  tabs.addView(tabHistory, Ui.weight(1));
-                  tabs.addView(tabPlayer, Ui.weight(1));
-                  root.addView(tabs, Ui.fill(this, 20));
-
+                  // daftar unduhan
+                  listCard = Ui.col(this);
+                  tabVideos = Ui.text(this, "Daftar unduhan", 17, Ui.TEXT, Ui.DISPLAY);
+                  listCard.addView(tabVideos);
+                  listCard.addView(Ui.hint(this, "Ketuk video yang sudah selesai untuk memutarnya."), Ui.fill(this, 2));
                   listBox = Ui.col(this);
-                  emptyList = Ui.hint(this, "Belum ada video. Tempel link folder, lalu tekan Pindai folder.");
+                  emptyList = Ui.hint(this, "Belum ada video.");
                   emptyList.setPadding(dp(4), dp(8), dp(4), dp(8));
-                  root.addView(listBox, Ui.fill(this, 8));
+                  listCard.addView(listBox, Ui.fill(this, 8));
+                  listCard.setVisibility(View.GONE);
+                  pageHome.addView(listCard, Ui.fill(this, 16));
 
-                  logPane = Ui.col(this);
-                  copyLogBtn = Ui.ghost(this, "Salin catatan");
-                  copyLogBtn.setTextSize(13);
-                  LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(WRAP, WRAP);
-                  cl.gravity = Gravity.END;
-                  logPane.addView(copyLogBtn, cl);
-                  logView = Ui.text(this, "", 12, Color.parseColor("#B7C1E6"), Typeface.MONOSPACE);
-                  logView.setTextIsSelectable(true);
-                  logView.setLineSpacing(0, 1.2f);
-                  logView.setBackground(Ui.box(this, Ui.PANEL, 12, 0));
-                  logView.setPadding(dp(12), dp(12), dp(12), dp(12));
-                  logView.setMinHeight(dp(120));
-                  logPane.addView(logView, Ui.fill(this, 8));
-                  root.addView(logPane, Ui.fill(this, 8));
-
-                  historyPane = Ui.col(this);
-                  clearHistoryBtn = Ui.ghost(this, "Hapus semua riwayat");
-                  clearHistoryBtn.setTextSize(13);
-                  LinearLayout.LayoutParams chl = new LinearLayout.LayoutParams(WRAP, WRAP);
-                  chl.gravity = Gravity.END;
-                  historyPane.addView(clearHistoryBtn, chl);
-                  historyBox = Ui.col(this);
-                  historyPane.addView(historyBox, Ui.fill(this, 8));
-                  root.addView(historyPane, Ui.fill(this, 8));
-
+                  // ---------- HALAMAN VIDEO SAYA ----------
+                  pageVideos.addView(Ui.text(this, "Video saya", 26, Ui.TEXT, Ui.DISPLAY));
+                  pageVideos.addView(Ui.hint(this, "Video yang sudah kamu unduh. Ketuk untuk memutar, tekan lama untuk pilihan lain."),
+                          Ui.fill(this, 2));
                   libraryPane = Ui.col(this);
+                  LinearLayout fsrow = Ui.row(this);
+                  libFilterSpin = Ui.spinner(this, LIB_FILTERS);
+                  libFilterSpin.setSelection(Math.max(0, Math.min(LIB_FILTERS.length - 1, prefs.getInt("libFilter", 0))));
+                  fsrow.addView(libFilterSpin, Ui.weight(1));
+                  libSortSpin = Ui.spinner(this, LIB_SORTS);
+                  libSortSpin.setSelection(Math.max(0, Math.min(LIB_SORTS.length - 1, prefs.getInt("libSort", 0))));
+                  LinearLayout.LayoutParams ssl = Ui.weight(1);
+                  ssl.leftMargin = dp(8);
+                  fsrow.addView(libSortSpin, ssl);
+                  libraryPane.addView(fsrow, Ui.fill(this, 12));
                   LinearLayout lbtn = Ui.row(this);
                   libGrid = prefs.getInt("libView", 0) == 0;
                   libViewBtn = Ui.ghost(this, "");
@@ -3271,21 +4149,211 @@ jobs:
                   LinearLayout.LayoutParams lrl = Ui.weight(1);
                   lrl.leftMargin = dp(8);
                   lbtn.addView(libOpenBtn, lrl);
-                  libraryPane.addView(lbtn);
+                  libraryPane.addView(lbtn, Ui.fill(this, 8));
                   libBox = Ui.col(this);
-                  libraryPane.addView(libBox, Ui.fill(this, 8));
-                  root.addView(libraryPane, Ui.fill(this, 8));
+                  libraryPane.addView(libBox, Ui.fill(this, 12));
+                  pageVideos.addView(libraryPane, Ui.fill(this, 4));
+
+                  // ---------- HALAMAN LAINNYA ----------
+                  pageMore.addView(Ui.text(this, "Lainnya", 26, Ui.TEXT, Ui.DISPLAY));
+
+                  // pengaturan dasar
+                  LinearLayout basic = Ui.card(this, false);
+                  basic.addView(Ui.title(this, "Pengaturan"));
+                  basic.addView(label("Simpan video ke"), Ui.fill(this, 14));
+                  LinearLayout frow = Ui.row(this);
+                  baseSpin = Ui.spinner(this, BASE_NAMES);
+                  baseSpin.setSelection(Math.max(0, Math.min(BASE_NAMES.length - 1, prefs.getInt("base", 0))));
+                  frow.addView(baseSpin, Ui.weight(1));
+                  TextView slash = Ui.text(this, "/", 18, Ui.MUTED, Ui.BODY);
+                  slash.setPadding(dp(10), 0, dp(10), 0);
+                  frow.addView(slash);
+                  folderInput = Ui.input(this, "nama folder");
+                  folderInput.setText(prefs.getString("folder", "Filecoster"));
+                  frow.addView(folderInput, Ui.weight(1.4f));
+                  basic.addView(frow, Ui.fill(this, 6));
+                  destPreview = Ui.hint(this, "");
+                  basic.addView(destPreview, Ui.fill(this, 6));
+                  basic.addView(label("Unduh berapa video sekaligus"), Ui.fill(this, 14));
+                  parSpin = Ui.spinner(this, parNames());
+                  parSpin.setSelection(Math.max(0, Math.min(PAR_VALUES.length - 1,
+                          prefs.getInt("par", indexOfPar(profile.recDownload)))));
+                  basic.addView(parSpin, Ui.fill(this, 6));
+                  keepBox = Ui.check(this, "Tetap berjalan saat layar dimatikan", prefs.getBoolean("keep", true));
+                  basic.addView(keepBox, Ui.fill(this, 14));
+                  LinearLayout brow = Ui.row(this);
+                  batteryStatus = Ui.hint(this, "");
+                  brow.addView(batteryStatus, Ui.weight(1));
+                  batteryBtn = Ui.ghost(this, "Izinkan");
+                  batteryBtn.setTextSize(13);
+                  brow.addView(batteryBtn);
+                  basic.addView(brow, Ui.fill(this, 4));
+                  adBox = Ui.check(this, "Blokir iklan", prefs.getBoolean("ads", true));
+                  adBlock = adBox.isChecked();
+                  basic.addView(adBox, Ui.fill(this, 10));
+                  dnsBox = Ui.check(this, "Buka situs yang diblokir provider (DNS Google 8.8.8.8)", prefs.getBoolean("dns", true));
+                  Net.enabled = dnsBox.isChecked();
+                  basic.addView(dnsBox, Ui.fill(this, 4));
+                  pageMore.addView(basic, Ui.fill(this, 14));
+
+                  // keamanan
+                  LinearLayout sec = Ui.card(this, false);
+                  sec.addView(Ui.title(this, "Kunci PIN"));
+                  pinInfo = Ui.hint(this, "");
+                  sec.addView(pinInfo, Ui.fill(this, 6));
+                  LinearLayout pinRow = Ui.row(this);
+                  pinSetBtn = Ui.ghost(this, "Atur PIN");
+                  pinSetBtn.setTextSize(13);
+                  pinRow.addView(pinSetBtn, Ui.weight(1));
+                  pinOffBtn = Ui.ghost(this, "Matikan PIN");
+                  pinOffBtn.setTextSize(13);
+                  pinOffBtn.setTextColor(Ui.PULSE);
+                  LinearLayout.LayoutParams pol = Ui.weight(1);
+                  pol.leftMargin = dp(8);
+                  pinRow.addView(pinOffBtn, pol);
+                  sec.addView(pinRow, Ui.fill(this, 10));
+                  pageMore.addView(sec, Ui.fill(this, 12));
+
+                  // pembaruan aplikasi
+                  LinearLayout upd = Ui.card(this, false);
+                  upd.addView(Ui.title(this, "Pembaruan aplikasi"));
+                  boolean debugKey = Updater.installedWithDebugKey(this);
+                  versionInfo = Ui.hint(this, "Versi terpasang: " + BuildConfig.VERSION_NAME + (debugKey
+                          ? "\n\u26A0 Aplikasi ini masih memakai kunci lama (build 16 atau sebelumnya), jadi pembaruan dari dalam "
+                          + "aplikasi akan ditolak Android. Hapus aplikasi ini sekali, lalu pasang APK terbaru dari GitHub."
+                          : ""));
+                  if (debugKey) versionInfo.setTextColor(Ui.AMBER);
+                  upd.addView(versionInfo, Ui.fill(this, 6));
+                  autoUpdateBox = Ui.check(this, "Periksa pembaruan otomatis", prefs.getBoolean("autoupd", true));
+                  upd.addView(autoUpdateBox, Ui.fill(this, 6));
+                  updateCheckBtn = Ui.ghost(this, "Periksa pembaruan sekarang");
+                  updateCheckBtn.setTextSize(13);
+                  upd.addView(updateCheckBtn, Ui.fill(this, 8));
+                  pageMore.addView(upd, Ui.fill(this, 12));
+
+                  // riwayat link
+                  LinearLayout hist = Ui.card(this, false);
+                  tabHistory = Ui.title(this, "Riwayat");
+                  hist.addView(tabHistory);
+                  historyPane = Ui.col(this);
+                  clearHistoryBtn = Ui.ghost(this, "Hapus semua riwayat");
+                  clearHistoryBtn.setTextSize(13);
+                  LinearLayout.LayoutParams chl = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  chl.gravity = Gravity.END;
+                  historyPane.addView(clearHistoryBtn, chl);
+                  historyBox = Ui.col(this);
+                  historyPane.addView(historyBox, Ui.fill(this, 8));
+                  hist.addView(historyPane, Ui.fill(this, 6));
+                  pageMore.addView(hist, Ui.fill(this, 12));
+
+                  // pengaturan lanjutan (dilipat)
+                  LinearLayout adv = Ui.card(this, false);
+                  LinearLayout shead = Ui.row(this);
+                  LinearLayout st = Ui.col(this);
+                  st.addView(Ui.title(this, "Pengaturan lanjutan"));
+                  settingsSummary = Ui.hint(this, "");
+                  st.addView(settingsSummary, Ui.fill(this, 2));
+                  shead.addView(st, Ui.weight(1));
+                  settingsChevron = Ui.text(this, "\u25BE", 20, Ui.MUTED, Ui.BODY);
+                  settingsChevron.setPadding(dp(12), 0, dp(4), 0);
+                  shead.addView(settingsChevron);
+                  shead.setClickable(true);
+                  adv.addView(shead);
+                  settingsBody = Ui.col(this);
+                  settingsBody.setVisibility(View.GONE);
+                  advancedBody = settingsBody;
+
+                  settingsBody.addView(section("Unduh semua dari folder"), Ui.fill(this, 18));
+                  subBox = Ui.check(this, "Ikut ambil subfolder (folder di dalam folder)", prefs.getBoolean("sub", true));
+                  settingsBody.addView(subBox, Ui.fill(this, 4));
+                  autoBox = Ui.check(this, "Mulai unduh otomatis setelah semua link terkumpul", prefs.getBoolean("auto", true));
+                  settingsBody.addView(autoBox, Ui.fill(this, 4));
+                  fastBox = Ui.check(this, "Ambil video begitu siap diputar (lebih cepat)", prefs.getBoolean("fast", true));
+                  settingsBody.addView(fastBox, Ui.fill(this, 4));
+                  settingsBody.addView(label("Susunan folder hasil unduhan"), Ui.fill(this, 12));
+                  saveSpin = Ui.spinner(this, SAVE_MODES);
+                  saveSpin.setSelection(Math.max(0, Math.min(SAVE_MODES.length - 1, prefs.getInt("save", 0))));
+                  settingsBody.addView(saveSpin, Ui.fill(this, 6));
+
+                  settingsBody.addView(section("Performa HP"), Ui.fill(this, 20));
+                  deviceInfo = Ui.hint(this, profile.describe());
+                  settingsBody.addView(deviceInfo, Ui.fill(this, 6));
+                  settingsBody.addView(label("Pengumpulan link bersamaan"), Ui.fill(this, 12));
+                  colSpin = Ui.spinner(this, colNames());
+                  colSpin.setSelection(Math.max(0, Math.min(MAX_COLLECT, prefs.getInt("col", 0))));
+                  settingsBody.addView(colSpin, Ui.fill(this, 6));
+                  colHint = Ui.hint(this, "");
+                  settingsBody.addView(colHint, Ui.fill(this, 8));
+                  recBtn = Ui.ghost(this, "Pakai rekomendasi untuk HP ini");
+                  recBtn.setTextSize(13);
+                  settingsBody.addView(recBtn, Ui.fill(this, 10));
+                  darkWebBox = Ui.check(this, "Sembunyikan tampilan web saat bekerja", prefs.getBoolean("darkweb", false));
+                  settingsBody.addView(darkWebBox, Ui.fill(this, 10));
+
+                  settingsBody.addView(section("Pola link"), Ui.fill(this, 20));
+                  settingsBody.addView(Ui.hint(this, "Isi hanya jika video atau subfolder tidak terdeteksi. "
+                          + "Masukkan bagian khas dari link-nya, misalnya /watch/ atau /folder/."), Ui.fill(this, 4));
+                  patternInput = Ui.input(this, "Pola link video");
+                  patternInput.setText(prefs.getString("pat", ""));
+                  settingsBody.addView(patternInput, Ui.fill(this, 10));
+                  folderPatternInput = Ui.input(this, "Pola link folder");
+                  folderPatternInput.setText(prefs.getString("fpat", ""));
+                  settingsBody.addView(folderPatternInput, Ui.fill(this, 8));
+                  adv.addView(settingsBody);
+                  pageMore.addView(adv, Ui.fill(this, 12));
+
+                  // catatan teknis (dilipat)
+                  LinearLayout logCard = Ui.card(this, false);
+                  LinearLayout lhead = Ui.row(this);
+                  tabLog = Ui.title(this, "Catatan teknis");
+                  lhead.addView(tabLog, Ui.weight(1));
+                  logChevron = Ui.text(this, "\u25BE", 20, Ui.MUTED, Ui.BODY);
+                  logChevron.setPadding(dp(12), 0, dp(4), 0);
+                  lhead.addView(logChevron);
+                  lhead.setClickable(true);
+                  lhead.setOnClickListener(v -> toggleLog(logPane.getVisibility() != View.VISIBLE));
+                  logCard.addView(lhead);
+                  logPane = Ui.col(this);
+                  copyLogBtn = Ui.ghost(this, "Salin catatan");
+                  copyLogBtn.setTextSize(13);
+                  LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  cl.gravity = Gravity.END;
+                  logPane.addView(copyLogBtn, Ui.fill(this, 10));
+                  logView = Ui.text(this, "", 12, Color.parseColor("#B7C1E6"), Typeface.MONOSPACE);
+                  logView.setTextIsSelectable(true);
+                  logView.setLineSpacing(0, 1.2f);
+                  logView.setBackground(Ui.box(this, Ui.ABYSS, 12, 0));
+                  logView.setPadding(dp(12), dp(12), dp(12), dp(12));
+                  logView.setMinHeight(dp(120));
+                  logPane.addView(logView, Ui.fill(this, 8));
+                  logPane.setVisibility(View.GONE);
+                  logCard.addView(logPane);
+                  pageMore.addView(logCard, Ui.fill(this, 12));
 
                   ScrollView scroll = new ScrollView(this) {
                       @Override
                       public void requestChildFocus(View child, View focused) {
-                          if (focused instanceof WebView) return;   // jangan loncat ke pratinjau web
+                          if (focused instanceof WebView) return;   // jangan loncat ke halaman web
                           super.requestChildFocus(child, focused);
                       }
                   };
                   mainScroll = scroll;
                   scroll.setFillViewport(true);
                   scroll.addView(root);
+
+                  // navigasi bawah
+                  LinearLayout nav = Ui.row(this);
+                  nav.setBackground(Ui.box(this, Ui.PANEL, 0, 0));
+                  nav.setPadding(dp(8), dp(4), dp(8), dp(4));
+                  navHome = navItem("\u2B07", "Unduh");
+                  tabPlayer = navItem("\u25B6", "Video saya");
+                  navMore = navItem("\u2630", "Lainnya");
+                  nav.addView(navHome, Ui.weight(1));
+                  nav.addView(tabPlayer, Ui.weight(1));
+                  nav.addView(navMore, Ui.weight(1));
+                  LinearLayout shell = Ui.col(this);
+                  shell.addView(scroll, new LinearLayout.LayoutParams(MATCH, 0, 1));
+                  shell.addView(nav, new LinearLayout.LayoutParams(MATCH, WRAP));
 
                   // lapisan hitam: layar tampak mati tapi aplikasi tetap bekerja
                   darkOverlay = new TextView(this);
@@ -3299,11 +4367,12 @@ jobs:
 
                   FrameLayout frame = new FrameLayout(this);
                   frame.setFitsSystemWindows(true);
-                  frame.addView(scroll);
+                  frame.addView(shell, new FrameLayout.LayoutParams(MATCH, MATCH));
                   frame.addView(darkOverlay, new FrameLayout.LayoutParams(MATCH, MATCH));
                   lockLayer = buildLockLayer();
                   frame.addView(lockLayer, new FrameLayout.LayoutParams(MATCH, MATCH));
                   setContentView(frame);
+                  showPage(PAGE_HOME);
 
                   // aksi
                   darkBtn.setOnClickListener(v -> setDark(true));
@@ -3324,13 +4393,27 @@ jobs:
                   });
                   previewToggle.setOnClickListener(v -> {
                       if (mode == Mode.SCAN || mode == Mode.CAPTURE) return;
-                      previewOpen = !previewOpen;
+                      previewOpen = false;
+                      if (sniffing) stopSniff();
+                      web.loadUrl("about:blank");
                       refreshUi();
                   });
-                  tabVideos.setOnClickListener(v -> showTab(0));
-                  tabLog.setOnClickListener(v -> showTab(1));
-                  tabHistory.setOnClickListener(v -> showTab(2));
-                  tabPlayer.setOnClickListener(v -> showTab(3));
+                  navHome.setOnClickListener(v -> showPage(PAGE_HOME));
+                  tabPlayer.setOnClickListener(v -> showPage(PAGE_VIDEOS));
+                  navMore.setOnClickListener(v -> showPage(PAGE_MORE));
+                  android.widget.AdapterView.OnItemSelectedListener libSel = new android.widget.AdapterView.OnItemSelectedListener() {
+                      @Override
+                      public void onItemSelected(android.widget.AdapterView<?> parent, View view, int pos, long id) {
+                          prefs.edit().putInt("libFilter", libFilterSpin.getSelectedItemPosition())
+                                  .putInt("libSort", libSortSpin.getSelectedItemPosition()).apply();
+                          if (currentPage == PAGE_VIDEOS) renderLibrary(null);
+                      }
+
+                      @Override
+                      public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+                  };
+                  libFilterSpin.setOnItemSelectedListener(libSel);
+                  libSortSpin.setOnItemSelectedListener(libSel);
                   libViewBtn.setOnClickListener(v -> {
                       libGrid = !libGrid;
                       prefs.edit().putInt("libView", libGrid ? 0 : 1).apply();
@@ -3453,20 +4536,77 @@ jobs:
                   return t;
               }
 
+              /** Kompatibel dengan pemanggil lama: 0 = daftar unduhan, 1 = catatan, 2 = riwayat, 3 = video saya. */
               void showTab(int which) {
-                  TextView[] tabs = {tabVideos, tabLog, tabHistory, tabPlayer};
-                  for (int i = 0; i < tabs.length; i++) {
-                      tabs[i].setBackground(which == i ? Ui.box(this, Ui.PANEL_HI, 9, Ui.LINE) : null);
-                      tabs[i].setTextColor(which == i ? Ui.TEXT : Ui.MUTED);
+                  if (which == 1) {
+                      toggleLog(true);           // catatan dibuka, tanpa memindahkan halaman
+                      return;
                   }
-                  listBox.setVisibility(which == 0 ? View.VISIBLE : View.GONE);
-                  logPane.setVisibility(which == 1 ? View.VISIBLE : View.GONE);
-                  historyPane.setVisibility(which == 2 ? View.VISIBLE : View.GONE);
-                  libraryPane.setVisibility(which == 3 ? View.VISIBLE : View.GONE);
-                  if (which == 2) renderHistory();
-                  if (which == 3) loadLibrary();
+                  showPage(which == 3 ? PAGE_VIDEOS : (which == 2 ? PAGE_MORE : PAGE_HOME));
               }
 
+              void showPage(int page) {
+                  boolean changed = currentPage != page;
+                  currentPage = page;
+                  pageHome.setVisibility(page == PAGE_HOME ? View.VISIBLE : View.GONE);
+                  pageVideos.setVisibility(page == PAGE_VIDEOS ? View.VISIBLE : View.GONE);
+                  pageMore.setVisibility(page == PAGE_MORE ? View.VISIBLE : View.GONE);
+                  TextView[] items = {navHome, tabPlayer, navMore};
+                  for (int i = 0; i < items.length; i++) {
+                      items[i].setTextColor(i == page ? Ui.ION : Ui.MUTED);
+                      items[i].setBackground(i == page ? Ui.box(this, Ui.ION_DEEP, 12, 0) : null);
+                  }
+                  if (changed) mainScroll.scrollTo(0, 0);
+                  if (page == PAGE_VIDEOS) loadLibrary();
+                  if (page == PAGE_MORE) renderHistory();
+              }
+
+              TextView navItem(String icon, String label) {
+                  TextView t = Ui.text(this, icon + "\n" + label, 12, Ui.MUTED, Ui.MEDIUM);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(0, dp(6), 0, dp(6));
+                  t.setClickable(true);
+                  return t;
+              }
+
+              void toggleLog(boolean open) {
+                  logPane.setVisibility(open ? View.VISIBLE : View.GONE);
+                  logChevron.setText(open ? "\u25B4" : "\u25BE");
+              }
+
+              static void styleGhost(Context c, TextView b) {
+                  b.setBackground(Ui.box(c, Color.TRANSPARENT, 10, Ui.LINE));
+                  b.setTextColor(Ui.ION);
+              }
+
+              /** Link terakhir di halaman Unduh: ketuk untuk mengisi kotak link. */
+              void renderRecent(List<JSONObject> list) {
+                  if (recentBox == null) return;
+                  recentBox.removeAllViews();
+                  int n = 0;
+                  for (final JSONObject o : list) {
+                      if (n++ >= 3) break;
+                      final String url = o.optString("url");
+                      LinearLayout r = Ui.col(this);
+                      r.setBackground(Ui.box(this, Ui.ABYSS, 10, 0));
+                      r.setPadding(dp(12), dp(9), dp(12), dp(9));
+                      TextView name = Ui.text(this, o.optString("name", url), 14, Ui.TEXT, Ui.BODY);
+                      name.setSingleLine(true);
+                      name.setEllipsize(TextUtils.TruncateAt.END);
+                      r.addView(name);
+                      TextView link = Ui.hint(this, url);
+                      link.setSingleLine(true);
+                      link.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                      r.addView(link);
+                      r.setClickable(true);
+                      r.setOnClickListener(v -> {
+                          if (mode == Mode.SCAN || mode == Mode.CAPTURE) return;
+                          urlInput.setText(url);
+                          setStatus("Link dipilih. Tekan Cari video.", Ui.ION);
+                      });
+                      recentBox.addView(r, Ui.fill(this, 6));
+                  }
+              }
               void setStatus(String msg, int color) {
                   statusText.setText(msg);
                   statusDot.setBackground(Ui.box(this, color, 4, 0));
@@ -3689,6 +4829,7 @@ jobs:
                   logView.setText("");
                   videos.clear();
                   doneUri.clear();
+                  rSizes.clear();
                   videos.add(new String[]{url, "", ""});
                   String ssp = u.getPath() == null ? "" : lastSegment(u.getPath());
                   recordHistory(url, ssp.isEmpty() ? String.valueOf(u.getHost()) : sanitize(Uri.decode(stripExt(ssp))), 1, 0, true);
@@ -3791,19 +4932,30 @@ jobs:
                       mainBtn.setText("Hentikan antrean unduhan");
                       Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
                   } else if (ready > 0) {
-                      mainBtn.setText("Mulai unduh " + ready + " video");
+                      mainBtn.setText("Mulai unduh " + ready + " video" + readySizeLabel());
                       Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
                   } else if (pending > 0) {
                       boolean onlyFailed = countState(ST_WAIT) == 0;
                       mainBtn.setText(onlyFailed ? "Coba lagi " + pending + " video gagal" : "Kumpulkan link " + pending + " video");
                       Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
                   } else {
-                      mainBtn.setText("Pindai folder");
+                      mainBtn.setText("Unduh semua video dari link folder");
                       Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
                   }
                   secBtn.setText(ready > 0 && pending > 0 ? "Kumpulkan " + pending + " link yang belum" : "Pindai ulang");
                   secBtn.setVisibility(mode == Mode.IDLE && (pending > 0 || ready > 0) ? View.VISIBLE : View.GONE);
-                  singleBtn.setVisibility(mode == Mode.IDLE ? View.VISIBLE : View.GONE);
+                  singleBtn.setVisibility(View.GONE);
+                  // Tampilan sederhana: saat tidak ada pekerjaan folder, "Cari video" jadi tombol utama.
+                  boolean folderWork = mode == Mode.SCAN || mode == Mode.CAPTURE || ready > 0 || pending > 0
+                          || (mode == Mode.DOWNLOAD && !sniffing);
+                  if (folderWork) {
+                      Ui.stylePrimary(this, browseBtn, Ui.PANEL_HI, Ui.ION);
+                      styleGhost(this, browseBtn);
+                  } else {
+                      Ui.stylePrimary(this, browseBtn, Ui.ION, Ui.ABYSS);
+                      if (mode == Mode.IDLE) styleGhost(this, mainBtn);
+                  }
+                  mainBtn.setVisibility(mode == Mode.DOWNLOAD && sniffing ? View.GONE : View.VISIBLE);
 
                   // saat mengunduh, pratinjau tetap bisa dipakai menjelajah (mode IDM) dan menambah unduhan
                   boolean webBusy = mode == Mode.SCAN || mode == Mode.CAPTURE;
@@ -3815,10 +4967,16 @@ jobs:
                   workerBox.setVisibility(mode == Mode.CAPTURE ? View.VISIBLE : View.GONE);
                   webCover.setVisibility(darkWeb() && mode == Mode.SCAN ? View.VISIBLE : View.GONE);
                   quietMain.quiet = webBusy;  // di luar pindai/kumpul, pratinjau bisa disentuh/diketik (mis. untuk login)
-                  previewToggle.setText(webBusy ? "Aktif" : (previewOpen ? "Sembunyikan" : "Tampilkan"));
+                  previewToggle.setText(webBusy ? "Aktif" : "Tutup");
                   previewToggle.setAlpha(webBusy ? 0.5f : 1f);
                   sniffCard.setVisibility(sniffing && !webBusy ? View.VISIBLE : View.GONE);
-                  tabVideos.setText(total > 0 ? "Video (" + total + ")" : "Video");
+                  tabVideos.setText(total > 0 ? "Daftar unduhan (" + total + ")" : "Daftar unduhan");
+                  listCard.setVisibility(total > 0 ? View.VISIBLE : View.GONE);
+                  progressCard.setVisibility(mode == Mode.SCAN || mode == Mode.CAPTURE || (total > 1 && !sniffing) ? View.VISIBLE : View.GONE);
+                  prevCard.setVisibility(webFrame.getVisibility() == View.VISIBLE || workerBox.getVisibility() == View.VISIBLE
+                          ? View.VISIBLE : View.GONE);
+                  recentCard.setVisibility(mode == Mode.IDLE && total == 0 && !sniffing && recentBox.getChildCount() > 0
+                          ? View.VISIBLE : View.GONE);
                   syncService();
               }
 
@@ -4121,6 +5279,10 @@ jobs:
                           Integer i = dlMap.get(id);
                           if (i == null) continue;
                           seen.add(id);
+                          if (i >= vState.length || i >= vPct.length) {
+                              finished.add(id);
+                              continue;
+                          }
                           int stt = cur.getInt(cSt);
                           long so = cur.getLong(cSo), tot = cur.getLong(cTot);
                           if (stt == DownloadManager.STATUS_SUCCESSFUL) {
@@ -4222,7 +5384,44 @@ jobs:
                       }
                   });
                   // halaman yang memicu unduhan file (tombol Download, dsb.) ditangkap seperti IDM
-                  web.setDownloadListener((url, ua, disposition, mime, length) -> onWebDownload(url, disposition, mime));
+                  web.setDownloadListener((url, ua, disposition, mime, length) -> onWebDownload(url, disposition, mime, length));
+              }
+
+              /** Total ukuran link yang siap diunduh, untuk tombol "Mulai unduh". Kosong jika belum ada yang diketahui. */
+              String readySizeLabel() {
+                  long sum = 0;
+                  int unknown = 0;
+                  for (int i = 0; i < vState.length; i++) {
+                      if (vState[i] != ST_READY) continue;
+                      Long sz = rSizes.get(i);
+                      if (sz != null && sz > 0) sum += sz;
+                      else unknown++;
+                  }
+                  if (sum <= 0) return "";
+                  return " (" + fmtSize(sum) + (unknown > 0 ? "+" : "") + ")";
+              }
+
+              static String sizeLabel(long[] est, boolean approx) {
+                  if (est[0] > 0) return (approx ? "\u00B1 " : "") + fmtSize(est[0]) + (est[1] > 0 ? " \u00B7 " + PlayerActivity.fmt(est[1]) : "");
+                  if (est[1] > 0) return "durasi " + PlayerActivity.fmt(est[1]) + ", ukuran tidak diketahui";
+                  return "ukuran tidak diketahui";
+              }
+
+              /** Hitung ukuran link yang sudah terkumpul (di latar belakang), lalu tampilkan di daftar sebelum diunduh. */
+              void measureLater(final int i, final String media, final String referer, final String name) {
+                  final String ua = web.getSettings().getUserAgentString();
+                  final String cookie = CookieManager.getInstance().getCookie(media);
+                  final boolean hls = isHls(media);
+                  bg.execute(() -> {
+                      final long[] est = hls ? HlsDownloader.estimate(media, ua, referer)
+                              : new long[]{probeSize(media, referer, ua, cookie), -1};
+                      h.post(() -> {
+                          if (i >= vState.length || vState[i] != ST_READY || rUrl == null || i >= rUrl.length || !media.equals(rUrl[i])) return;
+                          if (est[0] > 0) rSizes.put(i, est[0]);
+                          setState(i, ST_READY, name + " \u00B7 " + sizeLabel(est, hls));
+                          refreshUi();
+                      });
+                  });
               }
 
               // ---------------- JELAJAH & DETEKSI VIDEO (seperti IDM) ----------------
@@ -4250,6 +5449,7 @@ jobs:
                   recordHistory(url, String.valueOf(u.getHost()), 1, 0, true);
                   web.loadUrl(url);
                   final int s = ++sniffSeq;
+                  sniffPolls = 0;
                   h.postDelayed(() -> sniffPoll(s), 2500);
                   renderSniff();
                   refreshUi();
@@ -4268,6 +5468,8 @@ jobs:
               /** Baca juga sumber dari elemen video di halaman (termasuk iframe yang bisa diakses). */
               void sniffPoll(final int s) {
                   if (s != sniffSeq || !sniffing) return;
+                  // beberapa detik pertama: tekan play otomatis (tanpa suara) dan lewati iklan, agar video termuat
+                  if (sniffPolls++ < 8 && mode != Mode.SCAN && mode != Mode.CAPTURE) web.evaluateJavascript(JS_PLAY, null);
                   if (mode != Mode.SCAN && mode != Mode.CAPTURE) {
                       web.evaluateJavascript(JS_POLL, v -> {
                           if (s != sniffSeq || !sniffing) return;
@@ -4289,10 +5491,22 @@ jobs:
                   if (!fromVideoTag && !isMediaUrl(u)) return;
                   if (sniffed.containsKey(u) || sniffed.size() >= MAX_SNIFF) return;
                   String kind = isHls(u) ? "Stream HLS" : extOf(u).substring(1).toUpperCase(Locale.ROOT);
-                  sniffed.put(u, new String[]{kind, isHls(u) ? "kualitas terbaik" : "ukuran ...", ""});
+                  sniffed.put(u, new String[]{kind, "menghitung ukuran ...", ""});
                   renderSniff();
                   if (mode == Mode.IDLE) setStatus(sniffed.size() + " video terdeteksi. Tekan Unduh di daftar Video terdeteksi.", Ui.ION);
-                  if (isHls(u)) return;
+                  if (isHls(u)) {
+                      final String hRef = web.getUrl(), hUa = web.getSettings().getUserAgentString();
+                      bg.execute(() -> {
+                          final long[] est = HlsDownloader.estimate(u, hUa, hRef);
+                          h.post(() -> {
+                              String[] e = sniffed.get(u);
+                              if (e == null) return;
+                              e[1] = sizeLabel(est, true);
+                              renderSniff();
+                          });
+                      });
+                      return;
+                  }
                   final String ref = web.getUrl(), ua = web.getSettings().getUserAgentString();
                   final String cookie = CookieManager.getInstance().getCookie(u);
                   bg.execute(() -> {
@@ -4300,7 +5514,7 @@ jobs:
                       h.post(() -> {
                           String[] e = sniffed.get(u);
                           if (e == null) return;
-                          e[1] = fmtSize(sz);
+                          e[1] = sz > 0 ? fmtSize(sz) : "ukuran tidak diketahui";
                           renderSniff();
                       });
                   });
@@ -4311,7 +5525,7 @@ jobs:
                   sniffBox.removeAllViews();
                   sniffTitle.setText(sniffed.isEmpty() ? "Video terdeteksi" : "Video terdeteksi (" + sniffed.size() + ")");
                   if (sniffed.isEmpty()) {
-                      TextView e = Ui.hint(this, "Belum ada. Tekan tombol play pada video di pratinjau di atas.");
+                      TextView e = Ui.hint(this, "Mencari video ... Jika belum muncul, tekan tombol play pada video di halaman web di atas.");
                       e.setPadding(dp(4), dp(6), dp(4), dp(6));
                       sniffBox.addView(e);
                       return;
@@ -4370,13 +5584,19 @@ jobs:
               }
 
               /** Halaman memicu unduhan file (bukan hanya video): diunduh langsung seperti IDM. */
-              void onWebDownload(String url, String disposition, String mime) {
+              void onWebDownload(String url, String disposition, String mime, long length) {
                   if (url == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
                       setStatus("Unduhan dari halaman ini tidak didukung (bukan link http).", Ui.AMBER);
                       return;
                   }
-                  String fname = sanitize(URLUtil.guessFileName(url, disposition, mime));
-                  enqueueDirect(url, web.getUrl(), fname, "");
+                  final String fname = sanitize(URLUtil.guessFileName(url, disposition, mime));
+                  final String ref = web.getUrl();
+                  new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                          .setTitle("Unduh file ini?")
+                          .setMessage(fname + "\n\nUkuran: " + (length > 0 ? fmtSize(length) : "tidak diketahui"))
+                          .setPositiveButton("Unduh", (d, w) -> enqueueDirect(url, ref, fname, ""))
+                          .setNegativeButton("Batal", null)
+                          .show();
               }
 
               /**
@@ -4461,6 +5681,7 @@ jobs:
                   allLinks.clear();
                   videos.clear();
                   doneUri.clear();
+                  rSizes.clear();
                   foldersScanned = 0;
                   subfolderCount = 0;
                   scanTitle = null;
@@ -5113,7 +6334,7 @@ jobs:
                           if (cs > bs || (cs == bs && d >= durs.get(best))) best = i;
                       }
                       if (best >= 0) {
-                          storeLink(urls.get(best), referer);
+                          storeLink(urls.get(best), referer, sizes[best]);
                       } else if (earlyDecision && System.currentTimeMillis() < deadline) {
                           earlyDecision = false;
                           fastOff = true;
@@ -5129,8 +6350,12 @@ jobs:
                       }
                   }
 
-                  /** Tahap 1: simpan link video yang berhasil ditemukan. Pengunduhan baru dimulai di tahap 2. */
                   void storeLink(String media, String referer) {
+                      storeLink(media, referer, -1);
+                  }
+
+                  /** Tahap 1: simpan link video yang berhasil ditemukan (beserta ukurannya). Pengunduhan baru dimulai di tahap 2. */
+                  void storeLink(String media, String referer, long size) {
                       String[] v = videos.get(item);
                       if (referer == null) referer = v[0];
                       String title = !v[1].isEmpty() ? v[1]
@@ -5143,7 +6368,13 @@ jobs:
                       rName[item] = name;
                       ok++;
                       wl("   link siap: " + name + "\n     " + shorten(media));
-                      setState(item, ST_READY, name);
+                      if (size > 0) {
+                          rSizes.put(item, size);
+                          setState(item, ST_READY, name + " \u00B7 " + fmtSize(size));
+                      } else {
+                          setState(item, ST_READY, name + " \u00B7 menghitung ukuran ...");
+                          measureLater(item, media, referer, name);
+                      }
                       refreshUi();
                       advance();
                   }
@@ -5281,12 +6512,15 @@ jobs:
               protected void onStart() {
                   super.onStart();
                   updateBatteryStatus();
-                  // Kunci lagi jika aplikasi ditinggal lebih dari 2 menit. Tidak dikunci selama ada proses
-                  // berjalan (pindai/kumpul/unduh) agar pekerjaan tidak terganggu.
-                  if (PinLock.isSet(this) && !locked && mode == Mode.IDLE && stoppedAt > 0
-                          && SystemClock.elapsedRealtime() - stoppedAt > RELOCK_AFTER_MS) {
-                      showLock(PIN_UNLOCK);
+                  // Aplikasi kembali dari latar belakang: PIN selalu diminta lagi (lihat AppLock). Proses yang
+                  // sedang berjalan tetap jalan di balik layar PIN.
+                  if (AppLock.needLock) {
+                      AppLock.needLock = false;
+                      if (PinLock.isSet(this) && !(lockLayer.getVisibility() == View.VISIBLE && pinStage == PIN_UNLOCK)) {
+                          showLock(PIN_UNLOCK);
+                      }
                   }
+                  if (currentPage == PAGE_VIDEOS && !libItems.isEmpty()) renderLibrary(null);   // perbarui penanda tonton
                   if (!dlMap.isEmpty() || !dlQueue.isEmpty() || !hlsJobs.isEmpty()) startTracker();
                   if (mode == Mode.CAPTURE && paused) {
                       paused = false;
@@ -5376,7 +6610,7 @@ jobs:
                               }
                               long size = o.optLong("size", -1);
                               String info = (size > 0 ? fmtSize(size) + " \u00B7 " : "") + fmt.format(new Date(o.optLong("time")));
-                              out.add(new String[]{uri, o.optString("name", "Video"), info});
+                              out.add(new String[]{uri, o.optString("name", "Video"), info, String.valueOf(o.optLong("time")), String.valueOf(size)});
                           }
                       } catch (Exception ignored) { }
                       h.post(() -> {
@@ -5417,32 +6651,122 @@ jobs:
                   if (libBox == null) return;
                   libBox.removeAllViews();
                   libViewBtn.setText(libGrid ? "Tampilan: Thumbnail" : "Tampilan: Daftar");
-                  tabPlayer.setText(msg == null && !libItems.isEmpty() ? "Pemutar (" + libItems.size() + ")" : "Pemutar");
                   if (msg != null || libItems.isEmpty()) {
                       TextView e = Ui.hint(this, msg != null ? msg
-                              : "Belum ada video yang diunduh. Video yang selesai diunduh lewat aplikasi ini akan muncul di sini.");
+                              : "Belum ada video. Video yang selesai diunduh lewat aplikasi ini akan muncul di sini.");
                       e.setPadding(dp(4), dp(8), dp(4), dp(8));
                       libBox.addView(e);
                       return;
                   }
                   final int s = libSeq;
+                  // status tonton tiap video
+                  final List<WatchStore.Entry> ws = new ArrayList<>();
+                  for (String[] it : libItems) ws.add(WatchStore.get(this, it[0]));
+
+                  // "Lanjutkan menonton": video yang terakhir ditonton dan belum selesai
+                  int cont = -1;
+                  for (int k = 0; k < libItems.size(); k++) {
+                      WatchStore.Entry e = ws.get(k);
+                      if (e != null && e.resumable() && (cont < 0 || e.time > ws.get(cont).time)) cont = k;
+                  }
+                  if (cont >= 0) {
+                      final int ci = cont;
+                      WatchStore.Entry e = ws.get(ci);
+                      LinearLayout c = Ui.row(this);
+                      c.setBackground(Ui.box(this, Ui.ION_DEEP, 12, Ui.ION));
+                      c.setPadding(dp(10), dp(10), dp(12), dp(10));
+                      ImageView th = thumbView();
+                      c.addView(th, new LinearLayout.LayoutParams(dp(96), dp(54)));
+                      LinearLayout mid = Ui.col(this);
+                      mid.setPadding(dp(12), 0, 0, 0);
+                      mid.addView(Ui.text(this, "\u25B6  Lanjutkan menonton", 13, Ui.ION, Ui.MEDIUM));
+                      TextView t = Ui.text(this, libItems.get(ci)[1], 14, Ui.TEXT, Ui.BODY);
+                      t.setSingleLine(true);
+                      t.setEllipsize(TextUtils.TruncateAt.END);
+                      mid.addView(t, Ui.fill(this, 2));
+                      mid.addView(Ui.hint(this, "dari " + PlayerActivity.fmt(e.pos) + (e.dur > 0 ? " / " + PlayerActivity.fmt(e.dur) : "")));
+                      mid.addView(progressBar(e.percent()), Ui.fill(this, 6));
+                      c.addView(mid, Ui.weight(1));
+                      c.setClickable(true);
+                      c.setOnClickListener(v -> playLibraryItem(ci));
+                      libBox.addView(c);
+                      loadThumb(th, libItems.get(ci)[0], s);
+                  }
+
+                  // saring & urutkan
+                  int filter = libFilterSpin.getSelectedItemPosition(), sort = libSortSpin.getSelectedItemPosition();
+                  libView.clear();
+                  for (int k = 0; k < libItems.size(); k++) {
+                      WatchStore.Entry e = ws.get(k);
+                      boolean done = e != null && e.done, started = e != null && !e.done && e.pos > WatchStore.MIN_RESUME_MS;
+                      if (filter == 1 && (done || started)) continue;
+                      if (filter == 2 && !started) continue;
+                      if (filter == 3 && !done) continue;
+                      libView.add(k);
+                  }
+                  final List<WatchStore.Entry> wsf = ws;
+                  Collections.sort(libView, (a, b) -> {
+                      String[] x = libItems.get(a), y = libItems.get(b);
+                      switch (sort) {
+                          case 1: {
+                              long ta = wsf.get(a) == null ? 0 : wsf.get(a).time, tb = wsf.get(b) == null ? 0 : wsf.get(b).time;
+                              return Long.compare(tb, ta);
+                          }
+                          case 2:
+                              return x[1].compareToIgnoreCase(y[1]);
+                          case 3:
+                              return Long.compare(parseLong(y[4]), parseLong(x[4]));
+                          default:
+                              return Long.compare(parseLong(y[3]), parseLong(x[3]));
+                      }
+                  });
+                  if (libView.isEmpty()) {
+                      TextView e = Ui.hint(this, "Tidak ada video untuk pilihan \"" + LIB_FILTERS[filter] + "\".");
+                      e.setPadding(dp(4), dp(12), dp(4), dp(8));
+                      libBox.addView(e);
+                      return;
+                  }
                   if (libGrid) {
                       LinearLayout row = null;
-                      for (int k = 0; k < libItems.size(); k++) {
-                          if (k % 2 == 0) {
+                      for (int n = 0; n < libView.size(); n++) {
+                          final int idx = libView.get(n);
+                          if (n % 2 == 0) {
                               row = Ui.row(this);
                               row.setGravity(Gravity.TOP);
                               row.setWeightSum(2);
-                              libBox.addView(row, Ui.fill(this, k == 0 ? 0 : 10));
+                              libBox.addView(row, Ui.fill(this, n == 0 ? 14 : 10));
                           }
-                          final int idx = k;
-                          final String[] it = libItems.get(k);
+                          final String[] it = libItems.get(idx);
+                          WatchStore.Entry e = ws.get(idx);
                           LinearLayout cell = Ui.col(this);
                           cell.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
                           cell.setPadding(dp(6), dp(6), dp(6), dp(8));
+                          FrameLayout tf = new FrameLayout(this);
                           ImageView th = thumbView();
-                          cell.addView(th, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96)));
-                          TextView t = Ui.text(this, it[1], 13, Ui.TEXT, Ui.BODY);
+                          tf.addView(th, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                          TextView badge = watchBadge(e);
+                          if (badge != null) {
+                              FrameLayout.LayoutParams bl = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                                      ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
+                              bl.setMargins(dp(5), dp(5), 0, 0);
+                              tf.addView(badge, bl);
+                          }
+                          if (e != null && e.dur > 0) {
+                              TextView du = Ui.text(this, PlayerActivity.fmt(e.dur), 11, Color.WHITE, Ui.MEDIUM);
+                              du.setBackground(Ui.box(this, 0xAA000000, 4, 0));
+                              du.setPadding(dp(5), dp(1), dp(5), dp(1));
+                              FrameLayout.LayoutParams dl = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                                      ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
+                              dl.setMargins(0, 0, dp(5), dp(7));
+                              tf.addView(du, dl);
+                          }
+                          if (e != null && e.percent() > 0) {
+                              FrameLayout.LayoutParams pbl = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                      dp(3), Gravity.BOTTOM);
+                              tf.addView(progressBar(e.percent()), pbl);
+                          }
+                          cell.addView(tf, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96)));
+                          TextView t = Ui.text(this, it[1], 13, e != null && e.done ? Ui.MUTED : Ui.TEXT, Ui.BODY);
                           t.setMaxLines(2);
                           t.setEllipsize(TextUtils.TruncateAt.END);
                           t.setPadding(dp(2), dp(6), dp(2), 0);
@@ -5454,34 +6778,88 @@ jobs:
                           inf.setPadding(dp(2), dp(2), dp(2), 0);
                           cell.addView(inf);
                           LinearLayout.LayoutParams cl = Ui.weight(1);
-                          if (k % 2 == 1) cl.leftMargin = dp(10);
+                          if (n % 2 == 1) cl.leftMargin = dp(10);
                           row.addView(cell, cl);
                           bindItem(cell, idx);
                           loadThumb(th, it[0], s);
                       }
-                      if (libItems.size() % 2 == 1 && row != null) row.addView(new View(this), Ui.weight(1));
+                      if (libView.size() % 2 == 1 && row != null) row.addView(new View(this), Ui.weight(1));
                   } else {
-                      for (int k = 0; k < libItems.size(); k++) {
-                          final String[] it = libItems.get(k);
+                      for (int n = 0; n < libView.size(); n++) {
+                          final int idx = libView.get(n);
+                          final String[] it = libItems.get(idx);
+                          WatchStore.Entry e = ws.get(idx);
                           LinearLayout r = Ui.row(this);
                           r.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
                           r.setPadding(dp(12), dp(10), dp(12), dp(10));
-                          TextView play = Ui.text(this, "\u25B6", 16, Ui.ION, Ui.MEDIUM);
-                          play.setPadding(0, 0, dp(12), 0);
-                          r.addView(play);
+                          boolean done = e != null && e.done;
+                          TextView icon = Ui.text(this, done ? "\u2713" : "\u25B6", 16, done ? Ui.MUTED : Ui.ION, Ui.MEDIUM);
+                          icon.setPadding(0, 0, dp(12), 0);
+                          r.addView(icon);
                           LinearLayout mid = Ui.col(this);
-                          TextView t = Ui.text(this, it[1], 14, Ui.TEXT, Ui.BODY);
+                          TextView t = Ui.text(this, it[1], 14, done ? Ui.MUTED : Ui.TEXT, Ui.BODY);
                           t.setMaxLines(2);
                           t.setEllipsize(TextUtils.TruncateAt.END);
                           mid.addView(t);
-                          mid.addView(Ui.hint(this, it[2]), Ui.fill(this, 2));
+                          mid.addView(Ui.hint(this, watchText(e) + " \u00B7 " + it[2]), Ui.fill(this, 2));
+                          if (e != null && e.percent() > 0 && !done) mid.addView(progressBar(e.percent()), Ui.fill(this, 6));
                           r.addView(mid, Ui.weight(1));
-                          libBox.addView(r, Ui.fill(this, 6));
-                          bindItem(r, k);
+                          libBox.addView(r, Ui.fill(this, n == 0 ? 14 : 6));
+                          bindItem(r, idx);
                       }
                   }
               }
 
+              static long parseLong(String v) {
+                  try {
+                      return Long.parseLong(v);
+                  } catch (Exception e) {
+                      return 0;
+                  }
+              }
+
+              /** Penanda di pojok thumbnail: BARU (belum pernah diputar) atau sudah ditonton. */
+              TextView watchBadge(WatchStore.Entry e) {
+                  String txt;
+                  int bg, fg;
+                  if (e == null) {
+                      txt = "BARU";
+                      bg = Ui.ION;
+                      fg = Ui.ABYSS;
+                  } else if (e.done) {
+                      txt = "\u2713 Ditonton";
+                      bg = 0xCC000000;
+                      fg = Color.WHITE;
+                  } else {
+                      return null;
+                  }
+                  TextView b = Ui.text(this, txt, 10.5f, fg, Ui.MEDIUM);
+                  b.setBackground(Ui.box(this, bg, 4, 0));
+                  b.setPadding(dp(5), dp(1), dp(5), dp(2));
+                  return b;
+              }
+
+              static String watchText(WatchStore.Entry e) {
+                  if (e == null) return "Belum ditonton";
+                  if (e.done) return "Sudah ditonton";
+                  if (e.pos > WatchStore.MIN_RESUME_MS) {
+                      int p = e.percent();
+                      return "Ditonton " + (p >= 0 ? p + "%" : "sampai " + PlayerActivity.fmt(e.pos));
+                  }
+                  return "Belum ditonton";
+              }
+
+              /** Bilah tipis kemajuan tonton (warna aksen di atas latar gelap). */
+              View progressBar(int percent) {
+                  LinearLayout bar = new LinearLayout(this);
+                  bar.setBackground(Ui.box(this, 0x66000000, 2, 0));
+                  bar.setWeightSum(100);
+                  View fill = new View(this);
+                  fill.setBackground(Ui.box(this, Ui.ION, 2, 0));
+                  bar.addView(fill, new LinearLayout.LayoutParams(0, dp(3), Math.max(1, Math.min(100, percent))));
+                  bar.setMinimumHeight(dp(3));
+                  return bar;
+              }
               ImageView thumbView() {
                   ImageView th = new ImageView(this);
                   th.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -5490,19 +6868,33 @@ jobs:
                   return th;
               }
 
-              /** Ketuk = putar, tekan lama = hapus dari daftar (atau sekalian hapus filenya). */
+              /** Ketuk = putar (daftar putar mengikuti urutan yang tampil), tekan lama = pilihan lain. */
               void bindItem(View v, final int idx) {
-                  v.setOnClickListener(x -> playLibrary(idx));
+                  v.setOnClickListener(x -> playLibraryItem(idx));
                   v.setOnLongClickListener(x -> {
                       if (idx >= libItems.size()) return true;
                       final String[] it = libItems.get(idx);
+                      WatchStore.Entry e = WatchStore.get(this, it[0]);
+                      final boolean done = e != null && e.done;
+                      String[] opts = {done ? "Tandai belum ditonton" : "Tandai sudah ditonton", "Putar dari awal",
+                              "Hapus dari daftar", "Hapus dari daftar dan hapus filenya"};
                       new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                               .setTitle(it[1])
-                              .setItems(new String[]{"Hapus dari daftar", "Hapus dari daftar dan hapus filenya"}, (d, w) -> {
+                              .setItems(opts, (d, w) -> {
+                                  if (w == 0) {
+                                      WatchStore.setDone(this, it[0], !done);
+                                      renderLibrary(null);
+                                      return;
+                                  }
+                                  if (w == 1) {
+                                      WatchStore.setDone(this, it[0], false);
+                                      playLibraryItem(idx);
+                                      return;
+                                  }
                                   Set<String> one = new HashSet<>();
                                   one.add(it[0]);
                                   removeDownloads(key("downloads"), one);
-                                  if (w == 1) deleteVideoFile(it[0]);
+                                  if (w == 3) deleteVideoFile(it[0]);
                                   thumbs.remove(it[0]);
                                   loadLibrary();
                               })
@@ -5511,6 +6903,17 @@ jobs:
                   });
               }
 
+              void playLibraryItem(int idx) {
+                  ArrayList<String> uris = new ArrayList<>(), names = new ArrayList<>();
+                  List<Integer> order = libView.contains(idx) ? libView : java.util.Collections.singletonList(idx);
+                  int start = 0;
+                  for (int k : order) {
+                      if (k == idx) start = uris.size();
+                      uris.add(libItems.get(k)[0]);
+                      names.add(libItems.get(k)[1]);
+                  }
+                  PlayerActivity.open(this, uris, names, start, null, null);
+              }
               void deleteVideoFile(String uri) {
                   try {
                       Uri u = Uri.parse(uri);
@@ -5754,7 +7157,7 @@ jobs:
               void updatePinUi() {
                   if (pinInfo == null) return;
                   boolean on = PinLock.isSet(this);
-                  pinInfo.setText(on ? "PIN aktif. Diminta saat aplikasi dibuka dan setelah ditinggal lebih dari 2 menit. "
+                  pinInfo.setText(on ? "PIN aktif. Diminta setiap kali aplikasi dibuka atau kembali dari latar belakang. "
                           + "Jika PIN salah, aplikasi tampil kosong seperti baru dipasang."
                           : "PIN belum aktif. Siapa pun yang membuka aplikasi bisa melihat riwayat dan video unduhan.");
                   pinSetBtn.setText(on ? "Ubah PIN" : "Atur PIN");
@@ -5768,13 +7171,30 @@ jobs:
                   loadingPrefs = true;
                   urlInput.setText(prefs.getString(key("url"), ""));
                   loadingPrefs = false;
-                  if (decoy && mode == Mode.IDLE) {
+                  if (decoy) {
+                      // Disengaja: profil kosong tidak boleh memperlihatkan pekerjaan profil asli. Pindai/kumpul dihentikan,
+                      // antrean unduhan dilepas (file yang sedang diunduh sistem tetap selesai di folder tujuan).
+                      if (mode != Mode.IDLE) {
+                          scanSeq++;
+                          pageQueue.clear();
+                          releaseWorkers();
+                          dlQueue.clear();
+                          dlMap.clear();
+                          for (AtomicBoolean c : hlsJobs.values()) c.set(true);
+                          hlsJobs.clear();
+                          h.removeCallbacks(tracker);
+                          tracking = false;
+                          paused = false;
+                          mode = Mode.IDLE;
+                          getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                      }
                       videos.clear();
                       vState = new int[0];
                       vPct = new int[0];
                       vNote = new String[0];
                       rUrl = null;
                       doneUri.clear();
+                      rSizes.clear();
                       found.clear();
                       foldersScanned = 0;
                       historyUrl = "";
@@ -5784,7 +7204,7 @@ jobs:
                       web.loadUrl("about:blank");
                       buildRows();
                       showTab(0);
-                      setStatus("Siap. Tempel link folder untuk mulai.", Ui.MUTED);
+                      setStatus("Tempel link video, lalu tekan Cari video.", Ui.MUTED);
                   }
                   libItems.clear();
                   thumbs.evictAll();
@@ -5809,6 +7229,7 @@ jobs:
                   it.addCategory(Intent.CATEGORY_OPENABLE);
                   it.setType("video/*");
                   try {
+                      AppLock.expectExternal();
                       startActivityForResult(it, REQ_OPEN_FILE);
                   } catch (Exception e) {
                       setStatus("Pemilih file tidak tersedia di HP ini.", Ui.AMBER);
@@ -5869,20 +7290,27 @@ jobs:
                   String notes = info.notes == null ? "" : info.notes.trim();
                   if (notes.length() > 400) notes = notes.substring(0, 400) + " ...";
                   updateNotes.setText("Terpasang: " + BuildConfig.VERSION_NAME + (notes.isEmpty() ? "" : "\n\n" + notes));
+                  updReinstall = false;
                   updateBtn.setText("Unduh & pasang" + (info.size > 0 ? " (" + fmtSize(info.size) + ")" : ""));
                   updateCard.setVisibility(View.VISIBLE);
               }
 
               void startUpdate() {
                   if (updBusy || pendingUpdate == null) return;
+                  if (updReinstall) {          // kunci berbeda: hanya bisa lewat hapus & pasang ulang
+                      openReleasePage();
+                      return;
+                  }
                   if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
                       try {
-                          startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+                          AppLock.expectExternal();
+                      startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
                       } catch (Exception ignored) { }
                       setStatus("Izinkan \"Pasang aplikasi tak dikenal\" untuk Filecoster, lalu tekan Unduh & pasang lagi.", Ui.AMBER);
                       return;
                   }
                   updBusy = true;
+                  updFallbackTried = false;
                   final Updater.Info info = pendingUpdate;
                   final Context app = getApplicationContext();
                   final AtomicBoolean cancel = new AtomicBoolean(false);
@@ -5897,6 +7325,7 @@ jobs:
                           err = Updater.verify(app, f);
                           if (err == null) {
                               h.post(() -> updateBtn.setText("Membuka penginstal ..."));
+                              AppLock.expectExternal();
                               Updater.install(app, f);
                           }
                       } catch (Exception e) {
@@ -5905,15 +7334,77 @@ jobs:
                       final String fe = err;
                       h.post(() -> {
                           updBusy = false;
-                          if (fe != null) {
+                          if (Updater.KEY_MISMATCH.equals(fe)) {
+                              updReinstall = true;
+                              updateBtn.setText("Buka halaman unduhan APK");
+                              updateNotes.setText(fe);
+                              setStatus("Perlu pasang ulang sekali. Lihat kartu pembaruan di atas.", Ui.PULSE);
+                              log("\nPembaruan: " + fe);
+                              mainScroll.smoothScrollTo(0, 0);
+                          } else if (fe != null) {
                               updateBtn.setText("Coba lagi");
                               setStatus("Pembaruan gagal: " + fe, Ui.PULSE);
+                              log("\nPembaruan gagal: " + fe);
                           } else {
                               updateBtn.setText("Menunggu konfirmasi pemasangan ...");
                               setStatus("Ikuti layar pemasangan Android untuk menyelesaikan pembaruan.", Ui.ION);
                           }
                       });
                   });
+              }
+
+              /** Hasil dari PackageInstaller. Gagal selain dibatalkan/kunci beda -> coba penginstal APK bawaan. */
+              void onInstallResult(boolean okInstall, int status, String msg, String raw) {
+                  log("\nPembaruan: " + msg + " [status " + status + (raw != null ? ", " + raw : "") + "]");
+                  if (okInstall) {
+                      setStatus(msg, Ui.ION);
+                      return;
+                  }
+                  boolean conflict = status == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT
+                          || status == android.content.pm.PackageInstaller.STATUS_FAILURE_INCOMPATIBLE;
+                  if (conflict) {
+                      updReinstall = true;
+                      updateBtn.setText("Buka halaman unduhan APK");
+                      updateNotes.setText(Updater.KEY_MISMATCH);
+                      setStatus(msg, Ui.PULSE);
+                      mainScroll.smoothScrollTo(0, 0);
+                      return;
+                  }
+                  if (status != android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED && !updFallbackTried
+                          && ApkProvider.file(this).isFile()) {
+                      updFallbackTried = true;
+                      setStatus("Cara pertama gagal (" + (raw != null ? raw : msg) + "). Mencoba lewat penginstal APK bawaan Android ...", Ui.AMBER);
+                      installViaSystem();
+                      return;
+                  }
+                  updateBtn.setText("Coba lagi");
+                  setStatus(msg + (raw != null ? " (" + raw + ")" : ""), Ui.PULSE);
+              }
+
+              /** Jalur cadangan: buka file APK dengan penginstal bawaan Android (berhasil di HP yang menolak cara pertama). */
+              void installViaSystem() {
+                  try {
+                      Intent it = new Intent(Intent.ACTION_VIEW);
+                      it.setDataAndType(ApkProvider.uri(this), ApkProvider.MIME);
+                      it.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                      AppLock.expectExternal();
+                      startActivity(it);
+                      updateBtn.setText("Menunggu penginstal Android ...");
+                  } catch (Exception e) {
+                      updateBtn.setText("Coba lagi");
+                      setStatus("Penginstal APK tidak bisa dibuka: " + e.getMessage(), Ui.PULSE);
+                  }
+              }
+
+              void openReleasePage() {
+                  String url = pendingUpdate != null && pendingUpdate.pageUrl != null ? pendingUpdate.pageUrl
+                          : "https://github.com/" + BuildConfig.UPDATE_REPO + "/releases/latest";
+                  try {
+                      AppLock.expectExternal();
+                      startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                  } catch (Exception e) {
+                      setStatus("Buka di browser: " + url, Ui.AMBER);
+                  }
               }
 
               // ---------------- RIWAYAT LINK ----------------
@@ -6006,6 +7497,8 @@ jobs:
                   historyBox.removeAllViews();
                   List<JSONObject> list = historyList();
                   tabHistory.setText(list.isEmpty() ? "Riwayat" : "Riwayat (" + list.size() + ")");
+                  renderRecent(list);
+                  if (recentCard != null) refreshUi();
                   clearHistoryBtn.setVisibility(list.isEmpty() ? View.GONE : View.VISIBLE);
                   if (list.isEmpty()) {
                       TextView e = Ui.hint(this, "Belum ada riwayat. Link yang sudah dipindai atau diunduh akan muncul di sini.");
@@ -6066,7 +7559,8 @@ jobs:
                           }
                           urlInput.setText(url);
                           mainScroll.smoothScrollTo(0, 0);
-                          setStatus(single ? "Link dipilih dari riwayat. Tekan Unduh langsung."
+                          showPage(PAGE_HOME);
+                          setStatus(single ? "Link dipilih dari riwayat. Tekan Cari video."
                                   : "Link dipilih dari riwayat. Tekan Pindai folder.", Ui.ION);
                       });
                       copy.setOnClickListener(v -> {
@@ -6093,7 +7587,9 @@ jobs:
               }
 
               static String fmtSize(long b) {
-                  return b < 0 ? "ukuran ?" : String.format("%.1f MB", b / 1048576.0);
+                  if (b < 0) return "ukuran ?";
+                  return b >= 1073741824L ? String.format(Locale.ROOT, "%.2f GB", b / 1073741824.0)
+                          : String.format(Locale.ROOT, "%.1f MB", b / 1048576.0);
               }
 
               static String fmtDur(double d) {
