@@ -419,176 +419,194 @@ jobs:
 
           mkdir -p app/src/main/java/com/example/fcdownloader
           cat > app/src/main/java/com/example/fcdownloader/RingView.java << 'EOF_FILE'
-          package com.example.fcdownloader;
+              package com.example.fcdownloader;
 
-          import android.animation.ValueAnimator;
-          import android.content.Context;
-          import android.graphics.BlurMaskFilter;
-          import android.graphics.Canvas;
-          import android.graphics.Paint;
-          import android.graphics.RectF;
-          import android.view.View;
-          import android.view.animation.LinearInterpolator;
+              import android.animation.ValueAnimator;
+              import android.content.Context;
+              import android.graphics.BlurMaskFilter;
+              import android.graphics.Canvas;
+              import android.graphics.DashPathEffect;
+              import android.graphics.Paint;
+              import android.graphics.RectF;
+              import android.view.View;
+              import android.view.animation.LinearInterpolator;
 
-          /**
-           * Cincin pemindai: berputar saat memindai, lalu menjadi pengukur kemajuan
-           * (ion = selesai, amber = sedang diunduh, merah = gagal).
-           */
-          public class RingView extends View {
-              private float done, active, failed;
-              private boolean spinning;
-              private float sweep;
-              private String big = "0", small = "";
-              private ValueAnimator anim;
+              /**
+               * Cincin pemindai futuristik: radar HUD berputar saat memindai, lalu menjadi pengukur kemajuan
+               * (ion = selesai, amber = sedang diunduh, merah = gagal).
+               */
+              public class RingView extends View {
+                  private float done, active, failed;
+                  private boolean spinning;
+                  private float sweep;
+                  private String big = "0", small = "";
+                  private ValueAnimator anim;
 
-              private final Paint track = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private final Paint arc = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private final Paint tBig = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private final Paint tSmall = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private final RectF rect = new RectF();
+                  private final Paint outerHud = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint innerHud = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint track = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint arc = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint tBig = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint tSmall = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final RectF rect = new RectF();
+                  private final RectF outerRect = new RectF();
+                  private final RectF innerRect = new RectF();
 
-              public RingView(Context c) {
-                  super(c);
-                  setLayerType(LAYER_TYPE_SOFTWARE, null); // perlu untuk efek pendar
-                  track.setStyle(Paint.Style.STROKE);
-                  track.setColor(Ui.LINE);
-                  arc.setStyle(Paint.Style.STROKE);
-                  arc.setStrokeCap(Paint.Cap.ROUND);
-                  glow.setStyle(Paint.Style.STROKE);
-                  glow.setStrokeCap(Paint.Cap.ROUND);
-                  tick.setStrokeCap(Paint.Cap.ROUND);
-                  tBig.setTypeface(Ui.DISPLAY);
-                  tBig.setColor(Ui.TEXT);
-                  tBig.setTextAlign(Paint.Align.CENTER);
-                  tSmall.setTypeface(Ui.BODY);
-                  tSmall.setColor(Ui.MUTED);
-                  tSmall.setTextAlign(Paint.Align.CENTER);
-              }
-
-              public void setProgress(float done, float active, float failed) {
-                  this.done = clamp(done);
-                  this.active = clamp(active);
-                  this.failed = clamp(failed);
-                  invalidate();
-              }
-
-              public void setCenter(String big, String small) {
-                  this.big = big;
-                  this.small = small;
-                  invalidate();
-              }
-
-              public void setSpinning(boolean on) {
-                  if (on == spinning) return;
-                  spinning = on;
-                  if (on) {
-                      anim = ValueAnimator.ofFloat(0, 360);
-                      anim.setDuration(1800);
-                      anim.setRepeatCount(ValueAnimator.INFINITE);
-                      anim.setInterpolator(new LinearInterpolator());
-                      anim.addUpdateListener(a -> {
-                          sweep = (float) a.getAnimatedValue();
-                          invalidate();
-                      });
-                      anim.start();
-                  } else if (anim != null) {
-                      anim.cancel();
-                      anim = null;
-                  }
-                  invalidate();
-              }
-
-              private static float clamp(float v) {
-                  return Math.max(0, Math.min(1, v));
-              }
-
-              @Override
-              protected void onDetachedFromWindow() {
-                  super.onDetachedFromWindow();
-                  if (anim != null) anim.cancel();
-              }
-
-              @Override
-              protected void onMeasure(int w, int h) {
-                  int size = MeasureSpec.getSize(w);
-                  int max = Ui.dp(getContext(), 210);
-                  int s = Math.min(size, max);
-                  setMeasuredDimension(s, s);
-              }
-
-              @Override
-              protected void onDraw(Canvas c) {
-                  float size = Math.min(getWidth(), getHeight());
-                  float cx = getWidth() / 2f, cy = getHeight() / 2f;
-                  float stroke = size * 0.055f;
-                  float r = size / 2f - stroke * 2.2f;
-                  rect.set(cx - r, cy - r, cx + r, cy + r);
-
-                  // skala tik di sisi luar, seperti cakram instrumen
-                  float tickIn = r + stroke * 1.0f, tickOut = r + stroke * 1.6f, tickLong = r + stroke * 2.0f;
-                  for (int i = 0; i < 60; i++) {
-                      double a = Math.toRadians(i * 6 - 90);
-                      boolean major = i % 5 == 0;
-                      tick.setStrokeWidth(major ? stroke * 0.18f : stroke * 0.10f);
-                      tick.setColor(major ? Ui.MUTED : Ui.LINE);
-                      float o = major ? tickLong : tickOut;
-                      c.drawLine(cx + (float) Math.cos(a) * tickIn, cy + (float) Math.sin(a) * tickIn,
-                              cx + (float) Math.cos(a) * o, cy + (float) Math.sin(a) * o, tick);
+                  public RingView(Context c) {
+                      super(c);
+                      setLayerType(LAYER_TYPE_SOFTWARE, null);
+                      outerHud.setStyle(Paint.Style.STROKE);
+                      outerHud.setColor(0x554FE3D4);
+                      outerHud.setPathEffect(new DashPathEffect(new float[]{10f, 8f}, 0));
+                      innerHud.setStyle(Paint.Style.STROKE);
+                      innerHud.setColor(0x334FE3D4);
+                      track.setStyle(Paint.Style.STROKE);
+                      track.setColor(Ui.LINE);
+                      arc.setStyle(Paint.Style.STROKE);
+                      arc.setStrokeCap(Paint.Cap.ROUND);
+                      glow.setStyle(Paint.Style.STROKE);
+                      glow.setStrokeCap(Paint.Cap.ROUND);
+                      tick.setStrokeCap(Paint.Cap.ROUND);
+                      tBig.setTypeface(Ui.DISPLAY);
+                      tBig.setColor(Ui.TEXT);
+                      tBig.setTextAlign(Paint.Align.CENTER);
+                      tSmall.setTypeface(Ui.MEDIUM);
+                      tSmall.setColor(Ui.ION);
+                      tSmall.setTextAlign(Paint.Align.CENTER);
                   }
 
-                  track.setStrokeWidth(stroke);
-                  c.drawArc(rect, 0, 360, false, track);
-                  arc.setStrokeWidth(stroke);
-                  glow.setStrokeWidth(stroke * 1.6f);
-                  glow.setMaskFilter(new BlurMaskFilter(stroke * 1.2f, BlurMaskFilter.Blur.NORMAL));
+                  public void setProgress(float done, float active, float failed) {
+                      this.done = clamp(done);
+                      this.active = clamp(active);
+                      this.failed = clamp(failed);
+                      invalidate();
+                  }
 
-                  if (spinning) {
-                      // ekor sapuan radar yang memudar
-                      for (int k = 0; k < 6; k++) {
-                          int alpha = 255 - k * 42;
+                  public void setCenter(String big, String small) {
+                      this.big = big;
+                      this.small = small;
+                      invalidate();
+                  }
+
+                  public void setSpinning(boolean on) {
+                      if (on == spinning) return;
+                      spinning = on;
+                      if (on) {
+                          anim = ValueAnimator.ofFloat(0, 360);
+                          anim.setDuration(1500);
+                          anim.setRepeatCount(ValueAnimator.INFINITE);
+                          anim.setInterpolator(new LinearInterpolator());
+                          anim.addUpdateListener(a -> {
+                              sweep = (float) a.getAnimatedValue();
+                              invalidate();
+                          });
+                          anim.start();
+                      } else if (anim != null) {
+                          anim.cancel();
+                          anim = null;
+                      }
+                      invalidate();
+                  }
+
+                  private static float clamp(float v) {
+                      return Math.max(0, Math.min(1, v));
+                  }
+
+                  @Override
+                  protected void onDetachedFromWindow() {
+                      super.onDetachedFromWindow();
+                      if (anim != null) anim.cancel();
+                  }
+
+                  @Override
+                  protected void onMeasure(int w, int h) {
+                      int size = MeasureSpec.getSize(w);
+                      int max = Ui.dp(getContext(), 210);
+                      if (size == 0 || size > max) size = max;
+                      setMeasuredDimension(size, size);
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas c) {
+                      float w = getWidth(), h = getHeight();
+                      float cx = w / 2f, cy = h / 2f;
+                      float stroke = Ui.dp(getContext(), 11);
+                      float pad = stroke + Ui.dp(getContext(), 12);
+                      rect.set(pad, pad, w - pad, h - pad);
+
+                      float oPad = pad - Ui.dp(getContext(), 9);
+                      outerRect.set(oPad, oPad, w - oPad, h - oPad);
+                      outerHud.setStrokeWidth(Ui.dp(getContext(), 1.5f));
+                      c.drawOval(outerRect, outerHud);
+
+                      float iPad = pad + Ui.dp(getContext(), 12);
+                      innerRect.set(iPad, iPad, w - iPad, h - iPad);
+                      innerHud.setStrokeWidth(Ui.dp(getContext(), 1f));
+                      c.drawOval(innerRect, innerHud);
+
+                      track.setStrokeWidth(stroke);
+                      c.drawOval(rect, track);
+
+                      // penanda sudut HUD (0, 90, 180, 270)
+                      float rOuter = (w / 2f) - oPad + Ui.dp(getContext(), 3);
+                      float rInner = (w / 2f) - oPad - Ui.dp(getContext(), 3);
+                      tick.setColor(Ui.ION);
+                      tick.setStrokeWidth(Ui.dp(getContext(), 2));
+                      for (int i = 0; i < 4; i++) {
+                          double rad = Math.toRadians(i * 90);
+                          float sx = cx + (float) Math.cos(rad) * rInner;
+                          float sy = cy + (float) Math.sin(rad) * rInner;
+                          float ex = cx + (float) Math.cos(rad) * rOuter;
+                          float ey = cy + (float) Math.sin(rad) * rOuter;
+                          c.drawLine(sx, sy, ex, ey, tick);
+                      }
+
+                      arc.setStrokeWidth(stroke);
+                      glow.setStrokeWidth(stroke * 1.45f);
+                      glow.setMaskFilter(new BlurMaskFilter(Ui.dp(getContext(), 9), BlurMaskFilter.Blur.NORMAL));
+
+                      if (spinning) {
+                          glow.setColor(0x774FE3D4);
+                          c.drawArc(rect, sweep - 90, 95, false, glow);
                           arc.setColor(Ui.ION);
-                          arc.setAlpha(Math.max(20, alpha));
-                          c.drawArc(rect, sweep - 90 - k * 12, 12, false, arc);
-                      }
-                      glow.setColor(Ui.ION);
-                      glow.setAlpha(150);
-                      c.drawArc(rect, sweep - 92, 10, false, glow);
-                      arc.setAlpha(255);
-                  } else {
-                      float start = -90;
-                      start = seg(c, start, done, Ui.ION);
-                      start = seg(c, start, active, Ui.AMBER);
-                      seg(c, start, failed, Ui.PULSE);
-                  }
+                          c.drawArc(rect, sweep - 90, 95, false, arc);
 
-                  tBig.setTextSize(size * 0.21f);
-                  tSmall.setTextSize(size * 0.065f);
-                  float bigY = cy + size * 0.045f;
-                  c.drawText(big, cx, bigY, tBig);
-                  if (small != null && !small.isEmpty()) {
-                      String[] lines = small.split("\n");
-                      float y = bigY + size * 0.10f;
-                      for (String line : lines) {
-                          c.drawText(line, cx, y, tSmall);
-                          y += size * 0.08f;
+                          arc.setColor(0x99FFC857);
+                          c.drawArc(rect, sweep + 110, 45, false, arc);
+                      } else {
+                          float start = -90;
+                          if (done > 0) {
+                              float a = done * 360f;
+                              glow.setColor(0x664FE3D4);
+                              c.drawArc(rect, start, a, false, glow);
+                              arc.setColor(Ui.ION);
+                              c.drawArc(rect, start, a, false, arc);
+                              start += a;
+                          }
+                          if (active > 0) {
+                              float a = active * 360f;
+                              glow.setColor(0x55FFC857);
+                              c.drawArc(rect, start, a, false, glow);
+                              arc.setColor(Ui.AMBER);
+                              c.drawArc(rect, start, a, false, arc);
+                              start += a;
+                          }
+                          if (failed > 0) {
+                              float a = failed * 360f;
+                              arc.setColor(Ui.PULSE);
+                              c.drawArc(rect, start, a, false, arc);
+                          }
                       }
+
+                      tBig.setTextSize(w * 0.21f);
+                      tSmall.setTextSize(w * 0.072f);
+                      float baseY = cy - (tBig.descent() + tBig.ascent()) / 2f - (small.isEmpty() ? 0 : w * 0.045f);
+                      c.drawText(big, cx, baseY, tBig);
+                      if (!small.isEmpty()) c.drawText(small.toUpperCase(), cx, baseY + w * 0.115f, tSmall);
                   }
               }
-
-              private float seg(Canvas c, float start, float frac, int color) {
-                  if (frac <= 0) return start;
-                  float sw = Math.max(2, frac * 360);
-                  glow.setColor(color);
-                  glow.setAlpha(110);
-                  c.drawArc(rect, start, sw, false, glow);
-                  arc.setColor(color);
-                  arc.setAlpha(255);
-                  c.drawArc(rect, start, sw, false, arc);
-                  return start + frac * 360;
-              }
-          }
           EOF_FILE
 
           mkdir -p app/src/main/java/com/example/fcdownloader
@@ -4415,18 +4433,37 @@ jobs:
                   titles.addView(appName);
                   titles.addView(Ui.text(this, "Unduh video dari link apa pun", 13, Ui.MUTED, Ui.BODY));
                   head.addView(titles, Ui.weight(1));
-                  darkBtn = Ui.ghost(this, "\u263E Gelap");
-                  darkBtn.setTextSize(13);
-                  head.addView(darkBtn);
+                  updateCheckBtn = Ui.ghost(this, "\u27F3 Perbarui");
+                  updateCheckBtn.setTextSize(12);
+                  updateCheckBtn.setPadding(dp(10), dp(7), dp(10), dp(7));
+                  head.addView(updateCheckBtn);
+                  darkBtn = Ui.ghost(this, "\u25D0 Gelap");
+                  darkBtn.setTextSize(12);
+                  darkBtn.setPadding(dp(10), dp(7), dp(10), dp(7));
+                  LinearLayout.LayoutParams dbl = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  dbl.leftMargin = dp(6);
+                  head.addView(darkBtn, dbl);
                   pageHome.addView(head);
 
                   // kartu pembaruan (muncul jika ada versi baru di GitHub)
                   updateCard = Ui.card(this, true);
-                  updateTitle = Ui.title(this, "Versi baru tersedia");
-                  updateCard.addView(updateTitle);
-                  updateNotes = Ui.hint(this, "");
-                  updateCard.addView(updateNotes, Ui.fill(this, 4));
-                  updateBtn = Ui.primary(this, "Unduh & pasang");
+                  updateCard.setBackground(Ui.box(this, Ui.PANEL_HI, 14, Ui.ION));
+                  LinearLayout updHdr = Ui.row(this);
+                  updateTitle = Ui.title(this, "\u26A1 Versi baru tersedia");
+                  updateTitle.setTextColor(Ui.ION);
+                  updHdr.addView(updateTitle, Ui.weight(1));
+                  TextView updClose = Ui.ghost(this, "\u2715");
+                  updClose.setTextSize(12);
+                  updClose.setPadding(dp(8), dp(4), dp(8), dp(4));
+                  updClose.setOnClickListener(v -> updateCard.setVisibility(View.GONE));
+                  updHdr.addView(updClose);
+                  updateCard.addView(updHdr);
+                  updateNotes = Ui.text(this, "", 13, Ui.TEXT, Ui.BODY);
+                  updateNotes.setLineSpacing(0, 1.25f);
+                  updateNotes.setBackground(Ui.box(this, Ui.ABYSS, 10, Ui.LINE));
+                  updateNotes.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  updateCard.addView(updateNotes, Ui.fill(this, 10));
+                  updateBtn = Ui.primary(this, "\u2B07  Unduh & pasang");
                   updateCard.addView(updateBtn, Ui.fill(this, 12));
                   updateCard.setVisibility(View.GONE);
                   pageHome.addView(updateCard, Ui.fill(this, 12));
@@ -4447,11 +4484,11 @@ jobs:
                   pl.leftMargin = dp(8);
                   lrow.addView(pasteBtn, pl);
                   linkCard.addView(lrow, Ui.fill(this, 12));
-                  browseBtn = Ui.primary(this, "\uD83D\uDD0D  Cari video");
+                  browseBtn = Ui.primary(this, "\u26A1  Cari video");
                   linkCard.addView(browseBtn, Ui.fill(this, 14));
-                  mainBtn = Ui.primary(this, "Unduh semua video dari link folder");
+                  mainBtn = Ui.primary(this, "\u2B07  Unduh semua video");
                   linkCard.addView(mainBtn, Ui.fill(this, 8));
-                  secBtn = Ui.ghost(this, "Pindai ulang");
+                  secBtn = Ui.ghost(this, "\u27F3  Pindai ulang");
                   linkCard.addView(secBtn, Ui.fill(this, 8));
                   singleBtn = Ui.ghost(this, "Unduh langsung (satu video)");
                   singleBtn.setVisibility(View.GONE);         // digantikan oleh Cari video
@@ -4478,8 +4515,13 @@ jobs:
                   pageHistory.addView(recentCard, Ui.fill(this, 14));
 
                   // kemajuan (hanya saat bekerja / ada daftar)
-                  progressCard = Ui.card(this, false);
+                  progressCard = Ui.card(this, true);
+                  progressCard.setBackground(Ui.box(this, Ui.PANEL, 14, Ui.ION_DEEP));
                   progressCard.setGravity(Gravity.CENTER_HORIZONTAL);
+                  TextView telHdr = Ui.text(this, "\u26A1 TELEMETRI UNDUHAN", 11.5f, Ui.ION, Ui.DISPLAY);
+                  telHdr.setLetterSpacing(0.12f);
+                  telHdr.setPadding(0, 0, 0, dp(6));
+                  progressCard.addView(telHdr);
                   ring = new RingView(this);
                   LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(WRAP, WRAP);
                   rp.gravity = Gravity.CENTER_HORIZONTAL;
@@ -4694,9 +4736,6 @@ jobs:
                   upd.addView(versionInfo, Ui.fill(this, 6));
                   autoUpdateBox = Ui.check(this, "Periksa pembaruan otomatis", prefs.getBoolean("autoupd", true));
                   upd.addView(autoUpdateBox, Ui.fill(this, 6));
-                  updateCheckBtn = Ui.ghost(this, "Periksa pembaruan sekarang");
-                  updateCheckBtn.setTextSize(13);
-                  upd.addView(updateCheckBtn, Ui.fill(this, 8));
                   pageMore.addView(upd, Ui.fill(this, 12));
 
                   // riwayat link
@@ -4816,7 +4855,7 @@ jobs:
                   navHome = navItem("\u2B07", "Unduh");
                   tabPlayer = navItem("\u25B6", "Video saya");
                   navHistory = navItem("\u21BA", "History");
-                  navMore = navItem("\u2630", "Lainnya");
+                  navMore = navItem("\u2699", "Lainnya");
                   nav.addView(navHome, Ui.weight(1));
                   nav.addView(tabPlayer, Ui.weight(1));
                   nav.addView(navHistory, Ui.weight(1));
@@ -5475,9 +5514,13 @@ jobs:
                           listBox.addView(g, Ui.fill(this, i == 0 ? 4 : 16));
                       }
                       LinearLayout r = Ui.row(this);
-                      r.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
+                      int rowBorder = vState[i] == ST_DONE ? Ui.ION_DEEP : (vState[i] == ST_FAIL ? Ui.PULSE : Ui.LINE);
+                      r.setBackground(Ui.box(this, Ui.PANEL, 12, rowBorder));
                       r.setPadding(dp(12), dp(11), dp(10), dp(11));
-                      r.addView(Ui.text(this, String.format("%03d", i + 1), 12, Ui.MUTED, Typeface.MONOSPACE));
+                      TextView numPill = Ui.text(this, String.format("%03d", i + 1), 11, Ui.ION, Typeface.MONOSPACE);
+                      numPill.setBackground(Ui.box(this, Ui.ABYSS, 6, Ui.LINE));
+                      numPill.setPadding(dp(6), dp(3), dp(6), dp(3));
+                      r.addView(numPill);
                       LinearLayout mid = Ui.col(this);
                       mid.setPadding(dp(12), 0, dp(8), 0);
                       String title = v[1].isEmpty() ? lastSegment(Uri.parse(v[0]).getPath() == null ? v[0] : Uri.parse(v[0]).getPath()) : v[1];
@@ -5506,13 +5549,13 @@ jobs:
                   if (i < 0 || i >= rowChips.size()) return;
                   TextView chip = rowChips.get(i);
                   switch (vState[i]) {
-                      case ST_SEARCH: Ui.setChip(this, chip, "Mencari", Ui.AMBER); break;
-                      case ST_QUEUED: Ui.setChip(this, chip, "Antre", Ui.AMBER); break;
-                      case ST_DL: Ui.setChip(this, chip, vPct[i] >= 0 ? vPct[i] + "%" : "Mengunduh", Ui.AMBER); break;
-                      case ST_READY: Ui.setChip(this, chip, "Link siap", Ui.TEXT); break;
-                      case ST_DONE: Ui.setChip(this, chip, doneUri.containsKey(i) ? "\u25B6 Putar" : "Selesai", Ui.ION); break;
-                      case ST_FAIL: Ui.setChip(this, chip, "Gagal", Ui.PULSE); break;
-                      default: Ui.setChip(this, chip, "Menunggu", Ui.MUTED);
+                      case ST_SEARCH: Ui.setChip(this, chip, "\u26A1 Mencari", Ui.AMBER); break;
+                      case ST_QUEUED: Ui.setChip(this, chip, "\u23F3 Antre", Ui.AMBER); break;
+                      case ST_DL: Ui.setChip(this, chip, vPct[i] >= 0 ? "\u2B07 " + vPct[i] + "%" : "\u2B07 Unduh", Ui.AMBER); break;
+                      case ST_READY: Ui.setChip(this, chip, "\u2726 Siap", Ui.TEXT); break;
+                      case ST_DONE: Ui.setChip(this, chip, doneUri.containsKey(i) ? "\u25B6 Putar" : "\u2713 Selesai", Ui.ION); break;
+                      case ST_FAIL: Ui.setChip(this, chip, "\u2715 Gagal", Ui.PULSE); break;
+                      default: Ui.setChip(this, chip, "\u2022 Menunggu", Ui.MUTED);
                   }
                   TextView note = rowNotes.get(i);
                   String n = vNote[i];
@@ -7843,7 +7886,7 @@ jobs:
               void checkUpdate(final boolean manual) {
                   if (updChecking || updBusy) return;
                   updChecking = true;
-                  if (manual) updateCheckBtn.setText("Memeriksa ...");
+                  if (manual) updateCheckBtn.setText("\u27F3 Cek...");
                   bg.execute(() -> {
                       Updater.Info info = null;
                       String err = null;
@@ -7856,7 +7899,7 @@ jobs:
                       final String fe = err;
                       h.post(() -> {
                           updChecking = false;
-                          updateCheckBtn.setText("Periksa pembaruan sekarang");
+                          updateCheckBtn.setText("\u27F3 Perbarui");
                           prefs.edit().putLong("updLast", System.currentTimeMillis()).apply();
                           if (fi == null) {
                               if (manual) setStatus("Gagal memeriksa pembaruan: " + fe, Ui.AMBER);
@@ -7875,12 +7918,18 @@ jobs:
 
               void showUpdate(Updater.Info info) {
                   pendingUpdate = info;
-                  updateTitle.setText("Versi baru tersedia: build " + info.build);
+                  updateTitle.setText("\u26A1 Update Tersedia (Build " + info.build + ")");
                   String notes = info.notes == null ? "" : info.notes.trim();
-                  if (notes.length() > 400) notes = notes.substring(0, 400) + " ...";
-                  updateNotes.setText("Terpasang: " + BuildConfig.VERSION_NAME + (notes.isEmpty() ? "" : "\n\n" + notes));
+                  if (notes.length() > 1200) notes = notes.substring(0, 1200) + " ...";
+                  if (notes.isEmpty()) notes = "Pembaruan fitur, peningkatan tampilan futuristik, dan perbaikan stabilitas aplikasi.";
+                  String meta = "Versi terpasang: " + BuildConfig.VERSION_NAME
+                          + (info.size > 0 ? "  \u2022  Ukuran: " + fmtSize(info.size) : "");
+                  updateNotes.setText(meta + "\n\nDeskripsi Update:\n" + notes);
+                  updateCheckBtn.setText("\u26A1 Update");
+                  updateCheckBtn.setTextColor(Ui.ION);
+                  updateCheckBtn.setBackground(Ui.box(this, Ui.ION_DEEP, 10, Ui.ION));
                   updReinstall = false;
-                  updateBtn.setText("Unduh & pasang" + (info.size > 0 ? " (" + fmtSize(info.size) + ")" : ""));
+                  updateBtn.setText("\u2B07  Unduh & pasang" + (info.size > 0 ? " (" + fmtSize(info.size) + ")" : ""));
                   updateCard.setVisibility(View.VISIBLE);
               }
 
@@ -8257,57 +8306,65 @@ jobs:
           mkdir -p app/src/main/res/drawable app/src/main/res/mipmap-anydpi app/src/main/res/mipmap-anydpi-v26
 
           cat > app/src/main/res/drawable/ic_launcher_background.xml << 'EOF_FILE'
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp"
-              android:height="108dp"
-              android:viewportWidth="108"
-              android:viewportHeight="108">
-              <path
-                  android:fillColor="#0A1024"
-                  android:pathData="M0,0h108v108h-108z" />
-              <path
-                  android:fillColor="#121A35"
-                  android:pathData="M54,54m-40,0a40,40 0 1,1 80,0a40,40 0 1,1 -80,0" />
-          </vector>
+              <?xml version="1.0" encoding="utf-8"?>
+              <vector xmlns:android="http://schemas.android.com/apk/res/android"
+                  android:width="108dp"
+                  android:height="108dp"
+                  android:viewportWidth="108"
+                  android:viewportHeight="108">
+                  <path
+                      android:fillColor="#070B19"
+                      android:pathData="M0,0h108v108h-108z" />
+                  <!-- heksagon cyber gelap -->
+                  <path
+                      android:fillColor="#121A35"
+                      android:strokeColor="#26325E"
+                      android:strokeWidth="1.8"
+                      android:pathData="M54,12L90,33L90,75L54,96L18,75L18,33Z" />
+              </vector>
           EOF_FILE
 
           cat > app/src/main/res/drawable/ic_launcher_foreground.xml << 'EOF_FILE'
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp"
-              android:height="108dp"
-              android:viewportWidth="108"
-              android:viewportHeight="108">
-              <!-- jalur cincin -->
-              <path
-                  android:fillColor="#00000000"
-                  android:strokeColor="#26325E"
-                  android:strokeWidth="5"
-                  android:pathData="M54,54m-26,0a26,26 0 1,1 52,0a26,26 0 1,1 -52,0" />
-              <!-- selesai (teal) -->
-              <path
-                  android:fillColor="#00000000"
-                  android:strokeColor="#4FE3D4"
-                  android:strokeWidth="5"
-                  android:strokeLineCap="round"
-                  android:pathData="M54,28A26,26 0 1,1 34.08,70.72" />
-              <!-- sedang berjalan (amber) -->
-              <path
-                  android:fillColor="#00000000"
-                  android:strokeColor="#FFC857"
-                  android:strokeWidth="5"
-                  android:strokeLineCap="round"
-                  android:pathData="M31.95,67.78A26,26 0 0,1 29.56,45.11" />
-              <!-- panah unduh -->
-              <path
-                  android:fillColor="#00000000"
-                  android:strokeColor="#E6ECFF"
-                  android:strokeWidth="4.5"
-                  android:strokeLineCap="round"
-                  android:strokeLineJoin="round"
-                  android:pathData="M54,42L54,58M45,50L54,59L63,50M45,66L63,66" />
-          </vector>
+              <?xml version="1.0" encoding="utf-8"?>
+              <vector xmlns:android="http://schemas.android.com/apk/res/android"
+                  android:width="108dp"
+                  android:height="108dp"
+                  android:viewportWidth="108"
+                  android:viewportHeight="108">
+                  <!-- cincin orbit futuristik -->
+                  <path
+                      android:fillColor="#00000000"
+                      android:strokeColor="#26325E"
+                      android:strokeWidth="3.5"
+                      android:pathData="M54,54m-29,0a29,29 0 1,1 58,0a29,29 0 1,1 -58,0" />
+                  <!-- busur neon cyan -->
+                  <path
+                      android:fillColor="#00000000"
+                      android:strokeColor="#4FE3D4"
+                      android:strokeWidth="4.5"
+                      android:strokeLineCap="round"
+                      android:pathData="M54,25A29,29 0 1,1 28.88,68.5" />
+                  <!-- aksen amber -->
+                  <path
+                      android:fillColor="#00000000"
+                      android:strokeColor="#FFC857"
+                      android:strokeWidth="4.5"
+                      android:strokeLineCap="round"
+                      android:pathData="M26.8,62.2A29,29 0 0,1 33.5,33.5" />
+                  <!-- inti panah unduh + play -->
+                  <path
+                      android:fillColor="#0E3B46"
+                      android:strokeColor="#4FE3D4"
+                      android:strokeWidth="2.2"
+                      android:pathData="M54,35L70,44.5L70,63.5L54,73L38,63.5L38,44.5Z" />
+                  <path
+                      android:fillColor="#00000000"
+                      android:strokeColor="#E6ECFF"
+                      android:strokeWidth="3.8"
+                      android:strokeLineCap="round"
+                      android:strokeLineJoin="round"
+                      android:pathData="M54,43L54,58M47,52L54,59L61,52M46,64L62,64" />
+              </vector>
           EOF_FILE
 
           cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml << 'EOF_FILE'
@@ -8321,46 +8378,39 @@ jobs:
 
           # cadangan untuk Android 7 (API 24-25), tanpa adaptive icon
           cat > app/src/main/res/mipmap-anydpi/ic_launcher.xml << 'EOF_FILE'
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp"
-              android:height="108dp"
-              android:viewportWidth="108"
-              android:viewportHeight="108">
-              <path
-                  android:fillColor="#0A1024"
-                  android:pathData="M24,0H84A24,24 0 0 1 108,24V84A24,24 0 0 1 84,108H24A24,24 0 0 1 0,84V24A24,24 0 0 1 24,0Z" />
-              <group
-                  android:pivotX="54"
-                  android:pivotY="54"
-                  android:scaleX="1.45"
-                  android:scaleY="1.45">
+              <?xml version="1.0" encoding="utf-8"?>
+              <vector xmlns:android="http://schemas.android.com/apk/res/android"
+                  android:width="108dp"
+                  android:height="108dp"
+                  android:viewportWidth="108"
+                  android:viewportHeight="108">
                   <path
-                      android:fillColor="#00000000"
+                      android:fillColor="#070B19"
+                      android:pathData="M0,0h108v108h-108z" />
+                  <path
+                      android:fillColor="#121A35"
                       android:strokeColor="#26325E"
-                      android:strokeWidth="5"
-                      android:pathData="M54,54m-26,0a26,26 0 1,1 52,0a26,26 0 1,1 -52,0" />
+                      android:strokeWidth="1.8"
+                      android:pathData="M54,12L90,33L90,75L54,96L18,75L18,33Z" />
                   <path
                       android:fillColor="#00000000"
                       android:strokeColor="#4FE3D4"
-                      android:strokeWidth="5"
+                      android:strokeWidth="4.5"
                       android:strokeLineCap="round"
-                      android:pathData="M54,28A26,26 0 1,1 34.08,70.72" />
+                      android:pathData="M54,25A29,29 0 1,1 28.88,68.5" />
                   <path
-                      android:fillColor="#00000000"
-                      android:strokeColor="#FFC857"
-                      android:strokeWidth="5"
-                      android:strokeLineCap="round"
-                      android:pathData="M31.95,67.78A26,26 0 0,1 29.56,45.11" />
+                      android:fillColor="#0E3B46"
+                      android:strokeColor="#4FE3D4"
+                      android:strokeWidth="2.2"
+                      android:pathData="M54,35L70,44.5L70,63.5L54,73L38,63.5L38,44.5Z" />
                   <path
                       android:fillColor="#00000000"
                       android:strokeColor="#E6ECFF"
-                      android:strokeWidth="4.5"
+                      android:strokeWidth="3.8"
                       android:strokeLineCap="round"
                       android:strokeLineJoin="round"
-                      android:pathData="M54,42L54,58M45,50L54,59L63,50M45,66L63,66" />
-              </group>
-          </vector>
+                      android:pathData="M54,43L54,58M47,52L54,59L61,52M46,64L62,64" />
+              </vector>
           EOF_FILE
 
       - uses: actions/setup-java@v5
