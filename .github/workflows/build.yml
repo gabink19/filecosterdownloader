@@ -4304,9 +4304,9 @@ jobs:
               long stoppedAt;
 
               // tampilan baru: tiga halaman dengan navigasi bawah
-              static final int PAGE_HOME = 0, PAGE_VIDEOS = 1, PAGE_MORE = 2;
-              LinearLayout pageHome, pageVideos, pageMore, progressCard, listCard, recentCard, recentBox, advancedBody;
-              TextView navHome, navMore, logChevron;
+              static final int PAGE_HOME = 0, PAGE_VIDEOS = 1, PAGE_HISTORY = 2, PAGE_MORE = 3;
+              LinearLayout pageHome, pageVideos, pageHistory, pageMore, progressCard, listCard, recentCard, recentBox, advancedBody;
+              TextView navHome, navHistory, navMore, recentEmpty, logChevron;
               int currentPage, sniffPolls;
               Spinner libFilterSpin, libSortSpin;
               final List<Integer> libView = new ArrayList<>();
@@ -4400,9 +4400,11 @@ jobs:
                   root.setPadding(dp(16), dp(14), dp(16), dp(24));
                   pageHome = Ui.col(this);
                   pageVideos = Ui.col(this);
+                  pageHistory = Ui.col(this);
                   pageMore = Ui.col(this);
                   root.addView(pageHome);
                   root.addView(pageVideos);
+                  root.addView(pageHistory);
                   root.addView(pageMore);
 
                   // ---------- HALAMAN UNDUH ----------
@@ -4464,13 +4466,16 @@ jobs:
                   linkCard.addView(srow, Ui.fill(this, 14));
                   pageHome.addView(linkCard, Ui.fill(this, 14));
 
-                  // link terakhir (hanya saat belum ada pekerjaan)
+                  // tab History: berisi Terakhir dibuka
+                  pageHistory.addView(Ui.text(this, "History", 26, Ui.TEXT, Ui.DISPLAY));
                   recentCard = Ui.card(this, false);
-                  recentCard.addView(Ui.text(this, "Terakhir dibuka", 14, Ui.MUTED, Ui.MEDIUM));
+                  recentCard.addView(Ui.title(this, "Terakhir dibuka"));
+                  recentEmpty = Ui.hint(this, "Belum ada link yang dibuka.");
+                  recentEmpty.setPadding(0, dp(6), 0, 0);
+                  recentCard.addView(recentEmpty);
                   recentBox = Ui.col(this);
                   recentCard.addView(recentBox, Ui.fill(this, 6));
-                  recentCard.setVisibility(View.GONE);
-                  pageHome.addView(recentCard, Ui.fill(this, 12));
+                  pageHistory.addView(recentCard, Ui.fill(this, 14));
 
                   // kemajuan (hanya saat bekerja / ada daftar)
                   progressCard = Ui.card(this, false);
@@ -4810,9 +4815,11 @@ jobs:
                   nav.setPadding(dp(8), dp(4), dp(8), dp(4));
                   navHome = navItem("\u2B07", "Unduh");
                   tabPlayer = navItem("\u25B6", "Video saya");
+                  navHistory = navItem("\u21BA", "History");
                   navMore = navItem("\u2630", "Lainnya");
                   nav.addView(navHome, Ui.weight(1));
                   nav.addView(tabPlayer, Ui.weight(1));
+                  nav.addView(navHistory, Ui.weight(1));
                   nav.addView(navMore, Ui.weight(1));
                   LinearLayout shell = Ui.col(this);
                   shell.addView(scroll, new LinearLayout.LayoutParams(MATCH, 0, 1));
@@ -4863,6 +4870,7 @@ jobs:
                   });
                   navHome.setOnClickListener(v -> showPage(PAGE_HOME));
                   tabPlayer.setOnClickListener(v -> showPage(PAGE_VIDEOS));
+                  navHistory.setOnClickListener(v -> showPage(PAGE_HISTORY));
                   navMore.setOnClickListener(v -> showPage(PAGE_MORE));
                   android.widget.AdapterView.OnItemSelectedListener libSel = new android.widget.AdapterView.OnItemSelectedListener() {
                       @Override
@@ -5017,15 +5025,16 @@ jobs:
                   currentPage = page;
                   pageHome.setVisibility(page == PAGE_HOME ? View.VISIBLE : View.GONE);
                   pageVideos.setVisibility(page == PAGE_VIDEOS ? View.VISIBLE : View.GONE);
+                  pageHistory.setVisibility(page == PAGE_HISTORY ? View.VISIBLE : View.GONE);
                   pageMore.setVisibility(page == PAGE_MORE ? View.VISIBLE : View.GONE);
-                  TextView[] items = {navHome, tabPlayer, navMore};
+                  TextView[] items = {navHome, tabPlayer, navHistory, navMore};
                   for (int i = 0; i < items.length; i++) {
                       items[i].setTextColor(i == page ? Ui.ION : Ui.MUTED);
                       items[i].setBackground(i == page ? Ui.box(this, Ui.ION_DEEP, 12, 0) : null);
                   }
                   if (changed) mainScroll.scrollTo(0, 0);
                   if (page == PAGE_VIDEOS) loadLibrary();
-                  if (page == PAGE_MORE) renderHistory();
+                  if (page == PAGE_HISTORY || page == PAGE_MORE) renderHistory();
               }
 
               TextView navItem(String icon, String label) {
@@ -5070,9 +5079,11 @@ jobs:
                           if (mode == Mode.SCAN || mode == Mode.CAPTURE) return;
                           urlInput.setText(url);
                           setStatus("Link dipilih. Tekan Cari video.", Ui.ION);
+                          showPage(PAGE_HOME);
                       });
                       recentBox.addView(r, Ui.fill(this, 6));
                   }
+                  if (recentEmpty != null) recentEmpty.setVisibility(recentBox.getChildCount() == 0 ? View.VISIBLE : View.GONE);
               }
               void setStatus(String msg, int color) {
                   statusText.setText(msg);
@@ -5442,8 +5453,7 @@ jobs:
                   progressCard.setVisibility(mode == Mode.SCAN || mode == Mode.CAPTURE || (total > 1 && !sniffing) ? View.VISIBLE : View.GONE);
                   prevCard.setVisibility(webFrame.getVisibility() == View.VISIBLE || workerBox.getVisibility() == View.VISIBLE
                           ? View.VISIBLE : View.GONE);
-                  recentCard.setVisibility(mode == Mode.IDLE && total == 0 && !sniffing && recentBox.getChildCount() > 0
-                          ? View.VISIBLE : View.GONE);
+                  recentCard.setVisibility(View.VISIBLE);
                   syncService();
               }
 
