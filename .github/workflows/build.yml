@@ -609,6 +609,411 @@ jobs:
               }
           EOF_FILE
 
+          cat > app/src/main/java/com/example/fcdownloader/FuturisticNavBar.java << 'EOF_FILE'
+          package com.example.fcdownloader;
+
+          import android.animation.ValueAnimator;
+          import android.content.Context;
+          import android.graphics.BlurMaskFilter;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.LinearGradient;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.RectF;
+          import android.graphics.Shader;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.animation.LinearInterpolator;
+          import android.view.animation.OvershootInterpolator;
+
+          /**
+           * Navigasi bawah futuristik (Cyber Dock HUD) dengan ikon vektor custom,
+           * kapsul neon yang bergeser mulus, dan efek glow berdenyut.
+           */
+          public class FuturisticNavBar extends View {
+
+              public interface OnTabSelectListener {
+                  void onTabSelected(int index);
+              }
+
+              private static final String[] LABELS = {"Unduh", "Video Saya", "Riwayat", "Lainnya"};
+              private int selectedIndex = 0;
+              private float animPos = 0f;
+              private int pressedIndex = -1;
+              private float pressScale = 1f;
+              private float pulsePhase = 0f;
+              private final String[] badges = {"", "", "", ""};
+
+              private ValueAnimator posAnim;
+              private ValueAnimator pressAnim;
+              private ValueAnimator pulseAnim;
+              private OnTabSelectListener listener;
+
+              private final Paint dockFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint dockStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint pillGlow = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint pillFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint pillStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint laserGlow = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint laserLine = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint iconGlow = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint badgeBg = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint badgeText = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint cornerHud = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+              private final RectF dockRect = new RectF();
+              private final RectF pillRect = new RectF();
+              private final RectF badgeRect = new RectF();
+              private final Path path = new Path();
+
+              public FuturisticNavBar(Context c) {
+                  super(c);
+                  setLayerType(LAYER_TYPE_SOFTWARE, null);
+                  setClickable(true);
+
+                  dockStroke.setStyle(Paint.Style.STROKE);
+                  dockStroke.setStrokeWidth(Ui.dp(c, 1.2f));
+                  dockStroke.setColor(0x8826325E);
+
+                  pillGlow.setStyle(Paint.Style.FILL);
+                  pillGlow.setColor(0x444FE3D4);
+                  pillGlow.setMaskFilter(new BlurMaskFilter(Ui.dp(c, 12), BlurMaskFilter.Blur.NORMAL));
+
+                  pillFill.setStyle(Paint.Style.FILL);
+                  pillFill.setColor(0xCC0E3B46);
+
+                  pillStroke.setStyle(Paint.Style.STROKE);
+                  pillStroke.setStrokeWidth(Ui.dp(c, 1.3f));
+                  pillStroke.setColor(0xBB4FE3D4);
+
+                  laserGlow.setStyle(Paint.Style.STROKE);
+                  laserGlow.setStrokeCap(Paint.Cap.ROUND);
+                  laserGlow.setStrokeWidth(Ui.dp(c, 6));
+                  laserGlow.setColor(0x994FE3D4);
+                  laserGlow.setMaskFilter(new BlurMaskFilter(Ui.dp(c, 6), BlurMaskFilter.Blur.NORMAL));
+
+                  laserLine.setStyle(Paint.Style.STROKE);
+                  laserLine.setStrokeCap(Paint.Cap.ROUND);
+                  laserLine.setStrokeWidth(Ui.dp(c, 2.5f));
+                  laserLine.setColor(Ui.ION);
+
+                  iconPaint.setStyle(Paint.Style.STROKE);
+                  iconPaint.setStrokeCap(Paint.Cap.ROUND);
+                  iconPaint.setStrokeJoin(Paint.Join.ROUND);
+
+                  iconGlow.setStyle(Paint.Style.STROKE);
+                  iconGlow.setStrokeCap(Paint.Cap.ROUND);
+                  iconGlow.setStrokeJoin(Paint.Join.ROUND);
+                  iconGlow.setColor(0x774FE3D4);
+                  iconGlow.setMaskFilter(new BlurMaskFilter(Ui.dp(c, 5), BlurMaskFilter.Blur.NORMAL));
+
+                  textPaint.setTextAlign(Paint.Align.CENTER);
+                  textPaint.setTypeface(Ui.MEDIUM);
+
+                  badgeBg.setStyle(Paint.Style.FILL);
+                  badgeText.setTextAlign(Paint.Align.CENTER);
+                  badgeText.setTypeface(Ui.DISPLAY);
+                  badgeText.setColor(Ui.ABYSS);
+
+                  cornerHud.setStyle(Paint.Style.STROKE);
+                  cornerHud.setStrokeCap(Paint.Cap.ROUND);
+                  cornerHud.setStrokeWidth(Ui.dp(c, 1.5f));
+                  cornerHud.setColor(0x664FE3D4);
+              }
+
+              public void setOnTabSelectListener(OnTabSelectListener l) {
+                  this.listener = l;
+              }
+
+              public void setBadge(int index, String text) {
+                  if (index < 0 || index >= badges.length) return;
+                  String clean = text == null ? "" : text.trim();
+                  if (!clean.equals(badges[index])) {
+                      badges[index] = clean;
+                      invalidate();
+                  }
+              }
+
+              public void setSelectedIndex(int idx, boolean animate) {
+                  if (idx < 0 || idx >= LABELS.length) return;
+                  selectedIndex = idx;
+                  if (posAnim != null) posAnim.cancel();
+                  if (!animate) {
+                      animPos = idx;
+                      invalidate();
+                      return;
+                  }
+                  posAnim = ValueAnimator.ofFloat(animPos, idx);
+                  posAnim.setDuration(340);
+                  posAnim.setInterpolator(new OvershootInterpolator(0.85f));
+                  posAnim.addUpdateListener(a -> {
+                      animPos = (float) a.getAnimatedValue();
+                      invalidate();
+                  });
+                  posAnim.start();
+              }
+
+              private void startPulse() {
+                  if (pulseAnim != null) return;
+                  pulseAnim = ValueAnimator.ofFloat(0f, (float) (Math.PI * 2));
+                  pulseAnim.setDuration(2600);
+                  pulseAnim.setRepeatCount(ValueAnimator.INFINITE);
+                  pulseAnim.setInterpolator(new LinearInterpolator());
+                  pulseAnim.addUpdateListener(a -> {
+                      pulsePhase = (float) a.getAnimatedValue();
+                      invalidate();
+                  });
+                  pulseAnim.start();
+              }
+
+              private void stopPulse() {
+                  if (pulseAnim != null) {
+                      pulseAnim.cancel();
+                      pulseAnim = null;
+                  }
+              }
+
+              @Override
+              protected void onAttachedToWindow() {
+                  super.onAttachedToWindow();
+                  startPulse();
+              }
+
+              @Override
+              protected void onDetachedFromWindow() {
+                  super.onDetachedFromWindow();
+                  stopPulse();
+                  if (posAnim != null) posAnim.cancel();
+                  if (pressAnim != null) pressAnim.cancel();
+              }
+
+              @Override
+              protected void onMeasure(int wSpec, int hSpec) {
+                  int w = MeasureSpec.getSize(wSpec);
+                  int h = Ui.dp(getContext(), 78);
+                  setMeasuredDimension(w, h);
+              }
+
+              @Override
+              protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+                  super.onSizeChanged(w, h, oldw, oldh);
+                  dockFill.setShader(new LinearGradient(0, 0, 0, h,
+                          0xF2151F42, 0xF80B1126, Shader.TileMode.CLAMP));
+              }
+
+              @Override
+              public boolean onTouchEvent(MotionEvent ev) {
+                  float w = getWidth();
+                  if (w <= 0) return false;
+                  float padH = Ui.dp(getContext(), 12);
+                  float innerW = w - padH * 2;
+                  float slotW = innerW / LABELS.length;
+                  int hit = (int) ((ev.getX() - padH) / slotW);
+                  hit = Math.max(0, Math.min(LABELS.length - 1, hit));
+
+                  switch (ev.getActionMasked()) {
+                      case MotionEvent.ACTION_DOWN:
+                          pressedIndex = hit;
+                          animatePress(0.86f);
+                          return true;
+                      case MotionEvent.ACTION_MOVE:
+                          if (hit != pressedIndex) {
+                              pressedIndex = hit;
+                              invalidate();
+                          }
+                          return true;
+                      case MotionEvent.ACTION_UP:
+                          int target = pressedIndex >= 0 ? pressedIndex : hit;
+                          pressedIndex = -1;
+                          animatePress(1f);
+                          setSelectedIndex(target, true);
+                          if (listener != null) listener.onTabSelected(target);
+                          performClick();
+                          return true;
+                      case MotionEvent.ACTION_CANCEL:
+                          pressedIndex = -1;
+                          animatePress(1f);
+                          return true;
+                  }
+                  return super.onTouchEvent(ev);
+              }
+
+              private void animatePress(float to) {
+                  if (pressAnim != null) pressAnim.cancel();
+                  pressAnim = ValueAnimator.ofFloat(pressScale, to);
+                  pressAnim.setDuration(150);
+                  pressAnim.addUpdateListener(a -> {
+                      pressScale = (float) a.getAnimatedValue();
+                      invalidate();
+                  });
+                  pressAnim.start();
+              }
+
+              @Override
+              protected void onDraw(Canvas c) {
+                  Context ctx = getContext();
+                  float w = getWidth(), h = getHeight();
+                  float padH = Ui.dp(ctx, 12);
+                  float padTop = Ui.dp(ctx, 6);
+                  float padBot = Ui.dp(ctx, 10);
+
+                  dockRect.set(padH, padTop, w - padH, h - padBot);
+                  float dockRad = Ui.dp(ctx, 22);
+                  c.drawRoundRect(dockRect, dockRad, dockRad, dockFill);
+                  c.drawRoundRect(dockRect, dockRad, dockRad, dockStroke);
+
+                  // Aksen sudut HUD futuristik pada dock
+                  float hudLen = Ui.dp(ctx, 14);
+                  c.drawLine(dockRect.left + dockRad * 0.7f, dockRect.top, dockRect.left + dockRad * 0.7f + hudLen, dockRect.top, cornerHud);
+                  c.drawLine(dockRect.right - dockRad * 0.7f - hudLen, dockRect.top, dockRect.right - dockRad * 0.7f, dockRect.top, cornerHud);
+
+                  float innerPad = Ui.dp(ctx, 5);
+                  float availW = dockRect.width() - innerPad * 2;
+                  float slotW = availW / LABELS.length;
+
+                  // Kapsul tab aktif yang bergeser mulus
+                  float pillLeft = dockRect.left + innerPad + animPos * slotW + Ui.dp(ctx, 3);
+                  float pillRight = pillLeft + slotW - Ui.dp(ctx, 6);
+                  float pillTop = dockRect.top + innerPad;
+                  float pillBot = dockRect.bottom - innerPad;
+                  pillRect.set(pillLeft, pillTop, pillRight, pillBot);
+                  float pillRad = Ui.dp(ctx, 17);
+
+                  float pulse = 0.75f + 0.25f * (float) Math.sin(pulsePhase);
+                  pillGlow.setAlpha((int) (68 * pulse));
+                  c.drawRoundRect(pillRect, pillRad, pillRad, pillGlow);
+                  c.drawRoundRect(pillRect, pillRad, pillRad, pillFill);
+                  pillStroke.setAlpha((int) (175 * pulse + 50));
+                  c.drawRoundRect(pillRect, pillRad, pillRad, pillStroke);
+
+                  // Garis laser neon di atas kapsul aktif
+                  float laserHalf = slotW * 0.22f;
+                  float pillCx = pillRect.centerX();
+                  float laserY = pillRect.top + Ui.dp(ctx, 1.2f);
+                  c.drawLine(pillCx - laserHalf, laserY, pillCx + laserHalf, laserY, laserGlow);
+                  c.drawLine(pillCx - laserHalf, laserY, pillCx + laserHalf, laserY, laserLine);
+
+                  // Gambar tiap item tab
+                  for (int i = 0; i < LABELS.length; i++) {
+                      float cx = dockRect.left + innerPad + (i + 0.5f) * slotW;
+                      float dist = Math.min(1f, Math.abs(animPos - i));
+                      float activeFrac = 1f - dist; // 1 = aktif, 0 = tidak aktif
+
+                      float scale = (1f + 0.10f * activeFrac) * (i == pressedIndex ? pressScale : 1f);
+                      float iconCy = dockRect.top + dockRect.height() * 0.37f - activeFrac * Ui.dp(ctx, 2.2f);
+
+                      int color = blendColor(Ui.MUTED, Ui.ION, activeFrac);
+                      int textColor = blendColor(Ui.MUTED, Ui.TEXT, activeFrac);
+
+                      c.save();
+                      c.scale(scale, scale, cx, iconCy);
+                      float r = Ui.dp(ctx, 9.5f);
+                      iconPaint.setStrokeWidth(Ui.dp(ctx, 1.9f + 0.35f * activeFrac));
+                      iconPaint.setColor(color);
+                      iconGlow.setStrokeWidth(Ui.dp(ctx, 3.8f));
+                      iconGlow.setAlpha((int) (130 * activeFrac * pulse));
+
+                      if (activeFrac > 0.15f) {
+                          drawTabIcon(c, i, cx, iconCy, r, iconGlow);
+                      }
+                      drawTabIcon(c, i, cx, iconCy, r, iconPaint);
+                      c.restore();
+
+                      // Label
+                      textPaint.setTextSize(Ui.dp(ctx, 10.5f + 0.6f * activeFrac));
+                      textPaint.setColor(textColor);
+                      textPaint.setTypeface(activeFrac > 0.5f ? Ui.DISPLAY : Ui.MEDIUM);
+                      float textY = dockRect.bottom - Ui.dp(ctx, 8.5f);
+                      c.drawText(LABELS[i], cx, textY, textPaint);
+
+                      // Badge jumlah (mis. jumlah video siap unduh)
+                      String b = badges[i];
+                      if (b != null && !b.isEmpty()) {
+                          badgeText.setTextSize(Ui.dp(ctx, 9.5f));
+                          float bw = Math.max(Ui.dp(ctx, 16), badgeText.measureText(b) + Ui.dp(ctx, 8));
+                          float bh = Ui.dp(ctx, 15);
+                          float bx = cx + Ui.dp(ctx, 8);
+                          float by = iconCy - Ui.dp(ctx, 12);
+                          badgeRect.set(bx, by, bx + bw, by + bh);
+                          badgeBg.setColor(i == 0 ? Ui.AMBER : Ui.ION);
+                          c.drawRoundRect(badgeRect, bh / 2f, bh / 2f, badgeBg);
+                          float bty = badgeRect.centerY() - (badgeText.descent() + badgeText.ascent()) / 2f;
+                          c.drawText(b, badgeRect.centerX(), bty, badgeText);
+                      }
+                  }
+              }
+
+              private void drawTabIcon(Canvas c, int index, float cx, float cy, float r, Paint p) {
+                  path.reset();
+                  switch (index) {
+                      case 0: // Unduh: panah cyber masuk ke baki heksagonal
+                          path.moveTo(cx, cy - r * 0.85f);
+                          path.lineTo(cx, cy + r * 0.35f);
+                          path.moveTo(cx - r * 0.5f, cy - r * 0.1f);
+                          path.lineTo(cx, cy + r * 0.42f);
+                          path.lineTo(cx + r * 0.5f, cy - r * 0.1f);
+                          // baki bawah
+                          path.moveTo(cx - r * 0.85f, cy + r * 0.4f);
+                          path.lineTo(cx - r * 0.65f, cy + r * 0.85f);
+                          path.lineTo(cx + r * 0.65f, cy + r * 0.85f);
+                          path.lineTo(cx + r * 0.85f, cy + r * 0.4f);
+                          c.drawPath(path, p);
+                          break;
+                      case 1: // Video Saya: bingkai layar futuristik + segitiga play
+                          RectF vr = new RectF(cx - r * 0.95f, cy - r * 0.72f, cx + r * 0.95f, cy + r * 0.72f);
+                          c.drawRoundRect(vr, r * 0.28f, r * 0.28f, p);
+                          path.moveTo(cx - r * 0.22f, cy - r * 0.34f);
+                          path.lineTo(cx + r * 0.38f, cy);
+                          path.lineTo(cx - r * 0.22f, cy + r * 0.34f);
+                          path.close();
+                          c.drawPath(path, p);
+                          break;
+                      case 2: // Riwayat: busur waktu orbit + jarum jam
+                          RectF hr = new RectF(cx - r * 0.85f, cy - r * 0.85f, cx + r * 0.85f, cy + r * 0.85f);
+                          c.drawArc(hr, -45, 285, false, p);
+                          // kepala panah di ujung atas kiri
+                          path.moveTo(cx - r * 0.88f, cy - r * 0.22f);
+                          path.lineTo(cx - r * 0.58f, cy - r * 0.62f);
+                          path.lineTo(cx - r * 0.22f, cy - r * 0.42f);
+                          // jarum jam
+                          path.moveTo(cx, cy - r * 0.42f);
+                          path.lineTo(cx, cy + r * 0.05f);
+                          path.lineTo(cx + r * 0.38f, cy + r * 0.26f);
+                          c.drawPath(path, p);
+                          break;
+                      case 3: // Lainnya: grid kontrol 2x2 cyber (3 kotak + 1 berlian)
+                          float g = r * 0.16f;
+                          float s = r * 0.68f;
+                          c.drawRoundRect(new RectF(cx - g - s, cy - g - s, cx - g, cy - g), r * 0.18f, r * 0.18f, p);
+                          c.drawRoundRect(new RectF(cx - g - s, cy + g, cx - g, cy + g + s), r * 0.18f, r * 0.18f, p);
+                          c.drawRoundRect(new RectF(cx + g, cy + g, cx + g + s, cy + g + s), r * 0.18f, r * 0.18f, p);
+                          // berlian di kanan atas
+                          float dcx = cx + g + s / 2f, dcy = cy - g - s / 2f, dr = s * 0.56f;
+                          path.moveTo(dcx, dcy - dr);
+                          path.lineTo(dcx + dr, dcy);
+                          path.lineTo(dcx, dcy + dr);
+                          path.lineTo(dcx - dr, dcy);
+                          path.close();
+                          c.drawPath(path, p);
+                          break;
+                  }
+              }
+
+              private static int blendColor(int c1, int c2, float ratio) {
+                  float r = Math.max(0f, Math.min(1f, ratio));
+                  float ir = 1f - r;
+                  int a = (int) (Color.alpha(c1) * ir + Color.alpha(c2) * r);
+                  int red = (int) (Color.red(c1) * ir + Color.red(c2) * r);
+                  int grn = (int) (Color.green(c1) * ir + Color.green(c2) * r);
+                  int blu = (int) (Color.blue(c1) * ir + Color.blue(c2) * r);
+                  return Color.argb(a, red, grn, blu);
+              }
+          }
+          EOF_FILE
+
           mkdir -p app/src/main/java/com/example/fcdownloader
           cat > app/src/main/java/com/example/fcdownloader/KeepAliveService.java << 'EOF_FILE'
           package com.example.fcdownloader;
@@ -3783,6 +4188,76 @@ jobs:
                   }
                   return out;
               }
+
+              /**
+               * Ambil 1 potongan awal stream m3u8 (dekripsi jika AES-128) untuk membuat thumbnail pratinjau.
+               */
+              static byte[] sampleSegment(String url, String ua, String referer) {
+                  try {
+                      HlsDownloader d = new HlsDownloader(ua, referer, new AtomicBoolean(false), new Listener() {
+                          @Override
+                          public void onProgress(int done, int total, long bytes) { }
+
+                          @Override
+                          public void onLog(String s) { }
+                      });
+                      String cur = url;
+                      String text = new String(d.fetch(cur, -1, -1, MAX_PLAYLIST), StandardCharsets.UTF_8);
+                      for (int hop = 0; hop < 3 && text.contains("#EXT-X-STREAM-INF"); hop++) {
+                          String next = d.pickVariant(text, cur);
+                          if (next == null) return null;
+                          cur = next;
+                          text = new String(d.fetch(cur, -1, -1, MAX_PLAYLIST), StandardCharsets.UTF_8);
+                      }
+                      String keyUri = null;
+                      byte[] keyIv = null;
+                      long mediaSeq = 0;
+                      Seg init = null;
+                      List<Seg> segs = new ArrayList<>();
+                      for (String raw : text.split("\\r?\\n")) {
+                          String line = raw.trim();
+                          if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+                              try { mediaSeq = Long.parseLong(line.substring(22).trim()); } catch (NumberFormatException ignored) { }
+                          } else if (line.startsWith("#EXT-X-KEY:")) {
+                              Map<String, String> a = attrs(line.substring(11));
+                              String method = a.containsKey("METHOD") ? a.get("METHOD") : "NONE";
+                              if ("AES-128".equals(method) && a.get("URI") != null) {
+                                  keyUri = resolve(cur, a.get("URI"));
+                                  keyIv = a.get("IV") == null ? null : hex(a.get("IV"));
+                              } else if ("NONE".equals(method)) {
+                                  keyUri = null;
+                                  keyIv = null;
+                              }
+                          } else if (line.startsWith("#EXT-X-MAP:")) {
+                              Map<String, String> a = attrs(line.substring(11));
+                              if (a.get("URI") != null) {
+                                  init = new Seg();
+                                  init.url = resolve(cur, a.get("URI"));
+                              }
+                          } else if (!line.isEmpty() && !line.startsWith("#")) {
+                              Seg s = new Seg();
+                              s.url = resolve(cur, line);
+                              s.keyUri = keyUri;
+                              if (keyUri != null) s.iv = keyIv != null ? keyIv : seqIv(mediaSeq + segs.size());
+                              segs.add(s);
+                              if (segs.size() >= 2) break;
+                          }
+                      }
+                      if (segs.isEmpty()) return null;
+                      Seg target = segs.get(segs.size() > 1 ? 1 : 0);
+                      byte[] segBytes = d.segment(target);
+                      if (init != null) {
+                          byte[] initBytes = d.fetchRetry(init.url, -1, -1);
+                          byte[] combined = new byte[initBytes.length + segBytes.length];
+                          System.arraycopy(initBytes, 0, combined, 0, initBytes.length);
+                          System.arraycopy(segBytes, 0, combined, initBytes.length, segBytes.length);
+                          return combined;
+                      }
+                      return segBytes;
+                  } catch (Exception ignored) {
+                      return null;
+                  }
+              }
               byte[] segment(Seg s) throws Exception {
                   byte[] d = fetchRetry(s.url, s.off, s.len);
                   if (s.keyUri == null) return d;
@@ -4042,6 +4517,12 @@ jobs:
           import android.view.ViewGroup;
           import android.view.WindowManager;
           import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Canvas;
+          import android.graphics.LinearGradient;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.Shader;
           import android.webkit.CookieManager;
           import android.webkit.URLUtil;
           import android.webkit.WebResourceError;
@@ -4130,10 +4611,13 @@ jobs:
               static final String JS_SCROLL =
                       "(function(){window.scrollTo(0,document.body.scrollHeight);return document.body.scrollHeight;})()";
               static final String JS_POLL =
-                      "(function(){var out={media:[],iframes:[]};" +
-                      "function scan(doc){try{var v=doc.querySelectorAll('video, video source');" +
+                      "(function(){var out={media:[],iframes:[],poster:''};" +
+                      "function findPoster(doc){try{var v=doc.querySelectorAll('video[poster]');for(var i=0;i<v.length;i++){if(v[i].poster&&v[i].poster.indexOf('http')===0)return v[i].poster;}" +
+                      "var og=doc.querySelector('meta[property=\"og:image\"],meta[name=\"twitter:image\"]');if(og&&og.content&&og.content.indexOf('http')===0)return og.content;" +
+                      "var im=doc.querySelectorAll('img[src]');for(var j=0;j<im.length;j++){var r=im[j].getBoundingClientRect();if(r.width>=120&&r.height>=68&&im[j].src.indexOf('http')===0)return im[j].src;}}catch(e){}return '';}" +
+                      "function scan(doc){try{if(!out.poster)out.poster=findPoster(doc);var v=doc.querySelectorAll('video, video source');" +
                       "for(var i=0;i<v.length;i++){var s=v[i].currentSrc||v[i].src;var d=0,rs=0;" +
-                      "try{var vv=v[i].tagName==='SOURCE'?v[i].parentNode:v[i];d=isFinite(vv.duration)?vv.duration:0;rs=vv.readyState||0;}catch(e){}" +
+                      "try{var vv=v[i].tagName==='SOURCE'?v[i].parentNode:v[i];d=isFinite(vv.duration)?vv.duration:0;rs=vv.readyState||0;if(!out.poster&&vv.poster&&vv.poster.indexOf('http')===0)out.poster=vv.poster;}catch(e){}" +
                       "if(s&&s.indexOf('http')===0)out.media.push([s,d,rs]);}" +
                       "var f=doc.querySelectorAll('iframe');" +
                       "for(var j=0;j<f.length;j++){if(f[j].src&&f[j].src.indexOf('http')===0)out.iframes.push(f[j].src);" +
@@ -4294,6 +4778,17 @@ jobs:
               // pemutar: file hasil unduhan yang sudah selesai (indeks video -> uri) + daftar video di HP
               final Map<Integer, String> doneUri = new HashMap<>();
               final Map<Integer, Long> rSizes = new HashMap<>();   // ukuran link yang sudah terkumpul (sebelum diunduh)
+              final Map<Integer, Long> rDurs = new HashMap<>();    // durasi video yang sudah terkumpul (milidetik)
+              final Map<Integer, String> rPoster = new HashMap<>(); // url gambar poster dari halaman web
+              final Set<Integer> dlSelected = new HashSet<>();     // indeks video yang dicentang untuk diunduh manual
+              final List<LinearLayout> rowCards = new ArrayList<>();
+              final List<ImageView> rowThumbs = new ArrayList<>();
+              final List<TextView> rowChecks = new ArrayList<>();
+              final List<TextView> rowSizeBadges = new ArrayList<>();
+              final List<TextView> rowDurBadges = new ArrayList<>();
+              LinearLayout dlSelBar;
+              TextView dlSelInfo, dlSelAllBtn, dlSelNoneBtn;
+              String sniffPoster = "";
               static final int MAX_LIBRARY = 150;
               static final int REQ_OPEN_FILE = 5;
               static final int MAX_DOWNLOADS = 500;
@@ -4321,9 +4816,10 @@ jobs:
               boolean decoy, locked;
               long stoppedAt;
 
-              // tampilan baru: tiga halaman dengan navigasi bawah
+              // tampilan baru: empat halaman dengan navigasi bawah futuristik
               static final int PAGE_HOME = 0, PAGE_VIDEOS = 1, PAGE_HISTORY = 2, PAGE_MORE = 3;
               LinearLayout pageHome, pageVideos, pageHistory, pageMore, progressCard, listCard, recentCard, recentBox, advancedBody;
+              FuturisticNavBar navBar;
               TextView navHome, navHistory, navMore, recentEmpty, logChevron;
               int currentPage, sniffPolls;
               Spinner libFilterSpin, libSortSpin;
@@ -4594,9 +5090,28 @@ jobs:
 
                   // daftar unduhan
                   listCard = Ui.col(this);
-                  tabVideos = Ui.text(this, "Daftar unduhan", 17, Ui.TEXT, Ui.DISPLAY);
+                  tabVideos = Ui.text(this, "Daftar video & link", 17, Ui.TEXT, Ui.DISPLAY);
                   listCard.addView(tabVideos);
-                  listCard.addView(Ui.hint(this, "Ketuk video yang sudah selesai untuk memutarnya."), Ui.fill(this, 2));
+                  listCard.addView(Ui.hint(this, "Centang video yang ingin diunduh setelah link, ukuran & thumbnail muncul. Ketuk thumbnail untuk pratinjau."), Ui.fill(this, 2));
+                  dlSelBar = Ui.row(this);
+                  dlSelBar.setBackground(Ui.box(this, Ui.PANEL_HI, 10, Ui.ION));
+                  dlSelBar.setPadding(dp(12), dp(8), dp(10), dp(8));
+                  dlSelBar.setVisibility(View.GONE);
+                  dlSelInfo = Ui.text(this, "0 dipilih", 13, Ui.ION, Ui.MEDIUM);
+                  dlSelBar.addView(dlSelInfo, Ui.weight(1));
+                  dlSelAllBtn = Ui.ghost(this, "Pilih semua");
+                  dlSelAllBtn.setTextSize(12);
+                  dlSelAllBtn.setPadding(dp(10), dp(6), dp(10), dp(6));
+                  dlSelAllBtn.setOnClickListener(v -> selectAllReady(true));
+                  dlSelBar.addView(dlSelAllBtn);
+                  dlSelNoneBtn = Ui.ghost(this, "Reset");
+                  dlSelNoneBtn.setTextSize(12);
+                  dlSelNoneBtn.setPadding(dp(10), dp(6), dp(10), dp(6));
+                  LinearLayout.LayoutParams dsnLp = new LinearLayout.LayoutParams(WRAP, WRAP);
+                  dsnLp.leftMargin = dp(6);
+                  dlSelNoneBtn.setOnClickListener(v -> selectAllReady(false));
+                  dlSelBar.addView(dlSelNoneBtn, dsnLp);
+                  listCard.addView(dlSelBar, Ui.fill(this, 10));
                   listBox = Ui.col(this);
                   emptyList = Ui.hint(this, "Belum ada video.");
                   emptyList.setPadding(dp(4), dp(8), dp(4), dp(8));
@@ -4773,7 +5288,7 @@ jobs:
                   settingsBody.addView(section("Unduh semua dari folder"), Ui.fill(this, 18));
                   subBox = Ui.check(this, "Ikut ambil subfolder (folder di dalam folder)", prefs.getBoolean("sub", true));
                   settingsBody.addView(subBox, Ui.fill(this, 4));
-                  autoBox = Ui.check(this, "Mulai unduh otomatis setelah semua link terkumpul", prefs.getBoolean("auto", true));
+                  autoBox = Ui.check(this, "Mulai unduh otomatis setelah semua link terkumpul (tanpa pilih manual)", prefs.getBoolean("auto", false));
                   settingsBody.addView(autoBox, Ui.fill(this, 4));
                   fastBox = Ui.check(this, "Ambil video begitu siap diputar (lebih cepat)", prefs.getBoolean("fast", true));
                   settingsBody.addView(fastBox, Ui.fill(this, 4));
@@ -4848,21 +5363,12 @@ jobs:
                   scroll.setFillViewport(true);
                   scroll.addView(root);
 
-                  // navigasi bawah
-                  LinearLayout nav = Ui.row(this);
-                  nav.setBackground(Ui.box(this, Ui.PANEL, 0, 0));
-                  nav.setPadding(dp(8), dp(4), dp(8), dp(4));
-                  navHome = navItem("\u2B07", "Unduh");
-                  tabPlayer = navItem("\u25B6", "Video saya");
-                  navHistory = navItem("\u21BA", "History");
-                  navMore = navItem("\u2699", "Lainnya");
-                  nav.addView(navHome, Ui.weight(1));
-                  nav.addView(tabPlayer, Ui.weight(1));
-                  nav.addView(navHistory, Ui.weight(1));
-                  nav.addView(navMore, Ui.weight(1));
+                  // navigasi bawah futuristik (Cyber Dock HUD)
+                  navBar = new FuturisticNavBar(this);
+                  navBar.setOnTabSelectListener(this::showPage);
                   LinearLayout shell = Ui.col(this);
                   shell.addView(scroll, new LinearLayout.LayoutParams(MATCH, 0, 1));
-                  shell.addView(nav, new LinearLayout.LayoutParams(MATCH, WRAP));
+                  shell.addView(navBar, new LinearLayout.LayoutParams(MATCH, WRAP));
 
                   // lapisan hitam: layar tampak mati tapi aplikasi tetap bekerja
                   darkOverlay = new TextView(this);
@@ -4907,10 +5413,6 @@ jobs:
                       web.loadUrl("about:blank");
                       refreshUi();
                   });
-                  navHome.setOnClickListener(v -> showPage(PAGE_HOME));
-                  tabPlayer.setOnClickListener(v -> showPage(PAGE_VIDEOS));
-                  navHistory.setOnClickListener(v -> showPage(PAGE_HISTORY));
-                  navMore.setOnClickListener(v -> showPage(PAGE_MORE));
                   android.widget.AdapterView.OnItemSelectedListener libSel = new android.widget.AdapterView.OnItemSelectedListener() {
                       @Override
                       public void onItemSelected(android.widget.AdapterView<?> parent, View view, int pos, long id) {
@@ -5062,15 +5564,20 @@ jobs:
               void showPage(int page) {
                   boolean changed = currentPage != page;
                   currentPage = page;
-                  pageHome.setVisibility(page == PAGE_HOME ? View.VISIBLE : View.GONE);
-                  pageVideos.setVisibility(page == PAGE_VIDEOS ? View.VISIBLE : View.GONE);
-                  pageHistory.setVisibility(page == PAGE_HISTORY ? View.VISIBLE : View.GONE);
-                  pageMore.setVisibility(page == PAGE_MORE ? View.VISIBLE : View.GONE);
-                  TextView[] items = {navHome, tabPlayer, navHistory, navMore};
-                  for (int i = 0; i < items.length; i++) {
-                      items[i].setTextColor(i == page ? Ui.ION : Ui.MUTED);
-                      items[i].setBackground(i == page ? Ui.box(this, Ui.ION_DEEP, 12, 0) : null);
+                  LinearLayout[] pages = {pageHome, pageVideos, pageHistory, pageMore};
+                  for (int i = 0; i < pages.length; i++) {
+                      if (i == page) {
+                          pages[i].setVisibility(View.VISIBLE);
+                          if (changed) {
+                              pages[i].setAlpha(0f);
+                              pages[i].setTranslationY(dp(12));
+                              pages[i].animate().alpha(1f).translationY(0f).setDuration(220).start();
+                          }
+                      } else {
+                          pages[i].setVisibility(View.GONE);
+                      }
                   }
+                  if (navBar != null) navBar.setSelectedIndex(page, changed);
                   if (changed) mainScroll.scrollTo(0, 0);
                   if (page == PAGE_VIDEOS) loadLibrary();
                   if (page == PAGE_HISTORY || page == PAGE_MORE) renderHistory();
@@ -5347,6 +5854,9 @@ jobs:
                   videos.clear();
                   doneUri.clear();
                   rSizes.clear();
+                  rDurs.clear();
+                  rPoster.clear();
+                  dlSelected.clear();
                   videos.add(new String[]{url, "", ""});
                   String ssp = u.getPath() == null ? "" : lastSegment(u.getPath());
                   recordHistory(url, ssp.isEmpty() ? String.valueOf(u.getHost()) : sanitize(Uri.decode(stripExt(ssp))), 1, 0, true);
@@ -5388,8 +5898,10 @@ jobs:
                   if (mode == Mode.SCAN) stopScan();
                   else if (mode == Mode.CAPTURE) stopCapture();
                   else if (mode == Mode.DOWNLOAD) stopDownloads();
-                  else if (countState(ST_READY) > 0) startDownloads();
-                  else if (pendingCount() > 0) startCollect();
+                  else if (countState(ST_READY) > 0) {
+                      if (selectedReadyCount() > 0) startDownloads();
+                      else setStatus("Pilih minimal 1 video yang sudah siap dari daftar di bawah.", Ui.AMBER);
+                  } else if (pendingCount() > 0) startCollect();
                   else startScan();
               }
 
@@ -5403,10 +5915,53 @@ jobs:
                   return countState(ST_WAIT) + countState(ST_FAIL);
               }
 
+              int selectedReadyCount() {
+                  int n = 0;
+                  for (int i = 0; i < vState.length; i++) {
+                      if (vState[i] == ST_READY && dlSelected.contains(i) && rUrl != null && i < rUrl.length && rUrl[i] != null) n++;
+                  }
+                  return n;
+              }
+
+              void selectAllReady(boolean select) {
+                  if (!select) {
+                      dlSelected.clear();
+                  } else {
+                      for (int i = 0; i < vState.length; i++) {
+                          if (vState[i] == ST_READY && rUrl != null && i < rUrl.length && rUrl[i] != null) dlSelected.add(i);
+                      }
+                  }
+                  for (int i = 0; i < vState.length; i++) paintRow(i);
+                  refreshUi();
+              }
+
+              void toggleSelectVideo(int idx) {
+                  if (idx < 0 || idx >= vState.length || vState[idx] != ST_READY) return;
+                  if (!dlSelected.remove(idx)) dlSelected.add(idx);
+                  paintRow(idx);
+                  refreshUi();
+              }
+
+              void previewOrPlayRow(int i) {
+                  if (i < 0 || i >= vState.length) return;
+                  if (vState[i] == ST_DONE) {
+                      playDone(i);
+                      return;
+                  }
+                  if (vState[i] == ST_READY && rUrl != null && i < rUrl.length && rUrl[i] != null) {
+                      ArrayList<String> one = new ArrayList<>(), names = new ArrayList<>();
+                      one.add(rUrl[i]);
+                      names.add(rName != null && i < rName.length && rName[i] != null ? rName[i] : "Video " + (i + 1));
+                      String ref = rRef != null && i < rRef.length && rRef[i] != null ? rRef[i] : rUrl[i];
+                      PlayerActivity.open(this, one, names, 0, ref, web.getSettings().getUserAgentString());
+                  }
+              }
+
               void refreshUi() {
                   int total = videos.size();
                   int done = countState(ST_DONE), failed = countState(ST_FAIL);
                   int ready = countState(ST_READY);
+                  int selReady = selectedReadyCount();
                   int active = countState(ST_SEARCH) + countState(ST_QUEUED) + countState(ST_DL) + ready;
                   int pending = pendingCount();
 
@@ -5416,6 +5971,20 @@ jobs:
                   statFail.setText(String.valueOf(failed));
                   statFail.setTextColor(failed > 0 ? Ui.PULSE : Ui.TEXT);
                   statDone.setTextColor(done > 0 ? Ui.ION : Ui.TEXT);
+
+                  if (navBar != null) {
+                      int badgeNum = mode == Mode.DOWNLOAD ? (countState(ST_QUEUED) + countState(ST_DL)) : ready;
+                      navBar.setBadge(PAGE_HOME, badgeNum > 0 ? String.valueOf(badgeNum) : "");
+                      navBar.setBadge(PAGE_VIDEOS, libItems.isEmpty() ? "" : String.valueOf(libItems.size()));
+                  }
+
+                  if (dlSelBar != null) {
+                      dlSelBar.setVisibility(ready > 0 ? View.VISIBLE : View.GONE);
+                      if (ready > 0) {
+                          dlSelInfo.setText("\u2713 " + selReady + " / " + ready + " video dipilih" + readySizeLabel());
+                          dlSelAllBtn.setText(selReady >= ready ? "Semua terpilih" : "Pilih semua (" + ready + ")");
+                      }
+                  }
 
                   if (mode == Mode.SCAN) {
                       ring.setSpinning(true);
@@ -5440,26 +6009,31 @@ jobs:
                   }
 
                   if (mode == Mode.SCAN) {
-                      mainBtn.setText("Hentikan pemindaian");
+                      mainBtn.setText("\u23F9  Hentikan pemindaian");
                       Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
                   } else if (mode == Mode.CAPTURE) {
-                      mainBtn.setText("Hentikan pengumpulan link");
+                      mainBtn.setText("\u23F9  Hentikan pengumpulan link (" + ready + "/" + total + ")");
                       Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
                   } else if (mode == Mode.DOWNLOAD) {
-                      mainBtn.setText("Hentikan antrean unduhan");
+                      mainBtn.setText("\u23F9  Hentikan antrean unduhan");
                       Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.PULSE);
                   } else if (ready > 0) {
-                      mainBtn.setText("Mulai unduh " + ready + " video" + readySizeLabel());
-                      Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
+                      if (selReady > 0) {
+                          mainBtn.setText("\u2B07  Unduh " + selReady + " video terpilih" + readySizeLabel());
+                          Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
+                      } else {
+                          mainBtn.setText("Pilih video dari daftar di bawah (" + ready + " siap)");
+                          Ui.stylePrimary(this, mainBtn, Ui.PANEL_HI, Ui.AMBER);
+                      }
                   } else if (pending > 0) {
                       boolean onlyFailed = countState(ST_WAIT) == 0;
-                      mainBtn.setText(onlyFailed ? "Coba lagi " + pending + " video gagal" : "Kumpulkan link " + pending + " video");
+                      mainBtn.setText(onlyFailed ? "\u27F3  Coba lagi " + pending + " video gagal" : "\u26A1  Dapatkan link " + pending + " video");
                       Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
                   } else {
-                      mainBtn.setText("Unduh semua video dari link folder");
+                      mainBtn.setText("\uD83D\uDD0D  Pindai folder & dapatkan link");
                       Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
                   }
-                  secBtn.setText(ready > 0 && pending > 0 ? "Kumpulkan " + pending + " link yang belum" : "Pindai ulang");
+                  secBtn.setText(ready > 0 && pending > 0 ? "Ambil " + pending + " link yang belum" : "Pindai ulang folder");
                   secBtn.setVisibility(mode == Mode.IDLE && (pending > 0 || ready > 0) ? View.VISIBLE : View.GONE);
                   singleBtn.setVisibility(View.GONE);
                   // Tampilan sederhana: saat tidak ada pekerjaan folder, "Cari video" jadi tombol utama.
@@ -5487,7 +6061,7 @@ jobs:
                   previewToggle.setText(webBusy ? "Aktif" : "Tutup");
                   previewToggle.setAlpha(webBusy ? 0.5f : 1f);
                   sniffCard.setVisibility(sniffing && !webBusy ? View.VISIBLE : View.GONE);
-                  tabVideos.setText(total > 0 ? "Daftar unduhan (" + total + ")" : "Daftar unduhan");
+                  tabVideos.setText(total > 0 ? "Daftar video & link (" + total + ")" : "Daftar video & link");
                   listCard.setVisibility(total > 0 ? View.VISIBLE : View.GONE);
                   progressCard.setVisibility(mode == Mode.SCAN || mode == Mode.CAPTURE || (total > 1 && !sniffing) ? View.VISIBLE : View.GONE);
                   prevCard.setVisibility(webFrame.getVisibility() == View.VISIBLE || workerBox.getVisibility() == View.VISIBLE
@@ -5498,6 +6072,11 @@ jobs:
 
               void buildRows() {
                   listBox.removeAllViews();
+                  rowCards.clear();
+                  rowThumbs.clear();
+                  rowChecks.clear();
+                  rowSizeBadges.clear();
+                  rowDurBadges.clear();
                   rowChips.clear();
                   rowNotes.clear();
                   if (videos.isEmpty()) {
@@ -5509,38 +6088,95 @@ jobs:
                       String[] v = videos.get(i);
                       if (!v[2].equals(lastRel)) {
                           lastRel = v[2];
-                          TextView g = Ui.text(this, lastRel.isEmpty() ? "Folder utama" : lastRel, 13, Ui.ION, Ui.MEDIUM);
+                          TextView g = Ui.text(this, lastRel.isEmpty() ? "\uD83D\uDCC1 Folder utama" : "\uD83D\uDCC1 " + lastRel, 13, Ui.ION, Ui.MEDIUM);
                           g.setPadding(dp(4), 0, 0, 0);
                           listBox.addView(g, Ui.fill(this, i == 0 ? 4 : 16));
                       }
+                      final int idx = i;
                       LinearLayout r = Ui.row(this);
-                      int rowBorder = vState[i] == ST_DONE ? Ui.ION_DEEP : (vState[i] == ST_FAIL ? Ui.PULSE : Ui.LINE);
-                      r.setBackground(Ui.box(this, Ui.PANEL, 12, rowBorder));
-                      r.setPadding(dp(12), dp(11), dp(10), dp(11));
-                      TextView numPill = Ui.text(this, String.format("%03d", i + 1), 11, Ui.ION, Typeface.MONOSPACE);
-                      numPill.setBackground(Ui.box(this, Ui.ABYSS, 6, Ui.LINE));
-                      numPill.setPadding(dp(6), dp(3), dp(6), dp(3));
-                      r.addView(numPill);
+                      r.setBackground(Ui.box(this, Ui.PANEL, 12, Ui.LINE));
+                      r.setPadding(dp(10), dp(10), dp(10), dp(10));
+
+                      // Kotak centang pilih video
+                      TextView chk = Ui.text(this, "", 13, Ui.ABYSS, Ui.DISPLAY);
+                      chk.setGravity(Gravity.CENTER);
+                      LinearLayout.LayoutParams chkLp = new LinearLayout.LayoutParams(dp(24), dp(24));
+                      chkLp.rightMargin = dp(8);
+                      chk.setOnClickListener(x -> toggleSelectVideo(idx));
+                      r.addView(chk, chkLp);
+
+                      // Bingkai thumbnail 16:9 + badge nomor + durasi
+                      FrameLayout tf = new FrameLayout(this);
+                      ImageView th = thumbView();
+                      tf.addView(th, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                      TextView numPill = Ui.text(this, String.format("#%02d", i + 1), 9.5f, Ui.ION, Typeface.MONOSPACE);
+                      numPill.setBackground(Ui.box(this, 0xCC0A1024, 5, 0));
+                      numPill.setPadding(dp(4), dp(1), dp(4), dp(1));
+                      FrameLayout.LayoutParams npLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
+                      npLp.setMargins(dp(4), dp(4), 0, 0);
+                      tf.addView(numPill, npLp);
+
+                      TextView durBadge = Ui.text(this, "", 9.5f, Color.WHITE, Ui.MEDIUM);
+                      durBadge.setBackground(Ui.box(this, 0xCC000000, 4, 0));
+                      durBadge.setPadding(dp(4), dp(1), dp(4), dp(1));
+                      durBadge.setVisibility(View.GONE);
+                      FrameLayout.LayoutParams dbLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
+                      dbLp.setMargins(0, 0, dp(4), dp(4));
+                      tf.addView(durBadge, dbLp);
+
+                      tf.setOnClickListener(x -> previewOrPlayRow(idx));
+                      r.addView(tf, new LinearLayout.LayoutParams(dp(92), dp(54)));
+
+                      // Kolom judul + ukuran + catatan
                       LinearLayout mid = Ui.col(this);
-                      mid.setPadding(dp(12), 0, dp(8), 0);
+                      mid.setPadding(dp(10), 0, dp(6), 0);
                       String title = v[1].isEmpty() ? lastSegment(Uri.parse(v[0]).getPath() == null ? v[0] : Uri.parse(v[0]).getPath()) : v[1];
-                      TextView t = Ui.text(this, title, 14, Ui.TEXT, Ui.BODY);
+                      TextView t = Ui.text(this, title, 13.5f, Ui.TEXT, Ui.MEDIUM);
                       t.setMaxLines(2);
                       t.setEllipsize(TextUtils.TruncateAt.END);
                       mid.addView(t);
+
+                      LinearLayout metaRow = Ui.row(this);
+                      TextView sizeBadge = Ui.text(this, "", 11, Ui.ION, Ui.MEDIUM);
+                      sizeBadge.setBackground(Ui.box(this, Ui.ION_DEEP, 6, 0));
+                      sizeBadge.setPadding(dp(6), dp(2), dp(6), dp(2));
+                      sizeBadge.setVisibility(View.GONE);
+                      metaRow.addView(sizeBadge);
+
                       TextView note = Ui.hint(this, "");
+                      note.setTextSize(11.5f);
                       note.setSingleLine(true);
                       note.setEllipsize(TextUtils.TruncateAt.END);
                       note.setVisibility(View.GONE);
-                      mid.addView(note);
+                      metaRow.addView(note, Ui.weight(1));
+                      mid.addView(metaRow, Ui.fill(this, 4));
                       r.addView(mid, Ui.weight(1));
+
                       TextView chip = Ui.chip(this);
+                      chip.setOnClickListener(x -> {
+                          if (vState[idx] == ST_READY) {
+                              dlSelected.add(idx);
+                              startSingleReadyDownload(idx);
+                          } else if (vState[idx] == ST_DONE) {
+                              playDone(idx);
+                          }
+                      });
                       r.addView(chip);
+
+                      rowCards.add(r);
+                      rowThumbs.add(th);
+                      rowChecks.add(chk);
+                      rowSizeBadges.add(sizeBadge);
+                      rowDurBadges.add(durBadge);
                       rowChips.add(chip);
                       rowNotes.add(note);
-                      final int idx = i;
-                      r.setOnClickListener(x -> playDone(idx));
-                      listBox.addView(r, Ui.fill(this, 6));
+
+                      r.setOnClickListener(x -> {
+                          if (vState[idx] == ST_READY) toggleSelectVideo(idx);
+                          else if (vState[idx] == ST_DONE) playDone(idx);
+                      });
+                      listBox.addView(r, Ui.fill(this, 8));
                       paintRow(i);
                   }
               }
@@ -5548,18 +6184,69 @@ jobs:
               void paintRow(int i) {
                   if (i < 0 || i >= rowChips.size()) return;
                   TextView chip = rowChips.get(i);
+                  TextView chk = rowChecks.get(i);
+                  ImageView th = rowThumbs.get(i);
+                  TextView sizeBadge = rowSizeBadges.get(i);
+                  TextView durBadge = rowDurBadges.get(i);
+                  LinearLayout card = rowCards.get(i);
+
+                  boolean isReady = vState[i] == ST_READY;
+                  boolean isSel = isReady && dlSelected.contains(i);
+
+                  int rowBorder = vState[i] == ST_DONE ? Ui.ION
+                          : (vState[i] == ST_FAIL ? Ui.PULSE
+                          : (isSel ? Ui.ION : Ui.LINE));
+                  int rowBg = isSel ? Ui.PANEL_HI : Ui.PANEL;
+                  card.setBackground(Ui.box(this, rowBg, 12, rowBorder));
+
+                  if (isReady) {
+                      chk.setVisibility(View.VISIBLE);
+                      chk.setText(isSel ? "\u2713" : "");
+                      chk.setTextColor(isSel ? Ui.ABYSS : Ui.TEXT);
+                      chk.setBackground(Ui.box(this, isSel ? Ui.ION : Ui.ABYSS, 7, isSel ? Ui.ION : Ui.MUTED));
+                  } else if (vState[i] == ST_DONE) {
+                      chk.setVisibility(View.VISIBLE);
+                      chk.setText("\u2713");
+                      chk.setTextColor(Ui.ION);
+                      chk.setBackground(Ui.box(this, Ui.ION_DEEP, 7, Ui.ION));
+                  } else {
+                      chk.setVisibility(View.GONE);
+                  }
+
+                  Long sz = rSizes.get(i);
+                  if (sz != null && sz > 0) {
+                      sizeBadge.setText((rUrl != null && i < rUrl.length && rUrl[i] != null && isHls(rUrl[i]) ? "\u00B1 " : "") + fmtSize(sz));
+                      sizeBadge.setVisibility(View.VISIBLE);
+                  } else {
+                      sizeBadge.setVisibility(View.GONE);
+                  }
+
+                  Long du = rDurs.get(i);
+                  if (du != null && du > 0) {
+                      durBadge.setText(PlayerActivity.fmt(du));
+                      durBadge.setVisibility(View.VISIBLE);
+                  } else {
+                      durBadge.setVisibility(View.GONE);
+                  }
+
+                  String tKey = doneUri.containsKey(i) ? doneUri.get(i)
+                          : (rUrl != null && i < rUrl.length && rUrl[i] != null ? rUrl[i] : videos.get(i)[0]);
+                  Bitmap b = tKey == null ? null : thumbs.get(tKey);
+                  if (b == null && rPoster.containsKey(i)) b = thumbs.get(rPoster.get(i));
+                  th.setImageBitmap(b != null ? b : placeholderThumb(i));
+
                   switch (vState[i]) {
                       case ST_SEARCH: Ui.setChip(this, chip, "\u26A1 Mencari", Ui.AMBER); break;
                       case ST_QUEUED: Ui.setChip(this, chip, "\u23F3 Antre", Ui.AMBER); break;
                       case ST_DL: Ui.setChip(this, chip, vPct[i] >= 0 ? "\u2B07 " + vPct[i] + "%" : "\u2B07 Unduh", Ui.AMBER); break;
-                      case ST_READY: Ui.setChip(this, chip, "\u2726 Siap", Ui.TEXT); break;
+                      case ST_READY: Ui.setChip(this, chip, isSel ? "\u2B07 Siap" : "Pilih", isSel ? Ui.ION : Ui.MUTED); break;
                       case ST_DONE: Ui.setChip(this, chip, doneUri.containsKey(i) ? "\u25B6 Putar" : "\u2713 Selesai", Ui.ION); break;
                       case ST_FAIL: Ui.setChip(this, chip, "\u2715 Gagal", Ui.PULSE); break;
                       default: Ui.setChip(this, chip, "\u2022 Menunggu", Ui.MUTED);
                   }
                   TextView note = rowNotes.get(i);
                   String n = vNote[i];
-                  note.setText(n == null ? "" : n);
+                  note.setText(n == null ? "" : (sizeBadge.getVisibility() == View.VISIBLE && !n.isEmpty() ? "  \u00B7 " + n : n));
                   note.setTextColor(vState[i] == ST_FAIL ? Ui.PULSE : Ui.MUTED);
                   note.setVisibility(n == null || n.isEmpty() ? View.GONE : View.VISIBLE);
               }
@@ -5600,16 +6287,29 @@ jobs:
                   return PAR_VALUES[parSpin.getSelectedItemPosition()];
               }
 
-              /** Mulai mengunduh semua link yang sudah terkumpul, tanpa membuka halaman web lagi. */
+              /** Mulai mengunduh video yang dipilih dari link yang sudah terkumpul, tanpa membuka halaman web lagi. */
               void startDownloads() {
                   dlQueue.clear();
                   for (int i = 0; i < vState.length; i++) {
-                      if (vState[i] == ST_READY && rUrl != null && i < rUrl.length && rUrl[i] != null) dlQueue.add(i);
+                      if (vState[i] == ST_READY && dlSelected.contains(i) && rUrl != null && i < rUrl.length && rUrl[i] != null) dlQueue.add(i);
                   }
                   if (dlQueue.isEmpty()) return;
                   mode = Mode.DOWNLOAD;
-                  log("\nTahap 2: mengunduh " + dlQueue.size() + " video, maksimal " + maxParallel() + " sekaligus.");
-                  setStatus("Mengunduh " + dlQueue.size() + " video ...", Ui.AMBER);
+                  log("\nTahap 2: mengunduh " + dlQueue.size() + " video terpilih, maksimal " + maxParallel() + " sekaligus.");
+                  setStatus("Mengunduh " + dlQueue.size() + " video terpilih ...", Ui.AMBER);
+                  pump();
+                  startTracker();
+                  refreshUi();
+              }
+
+              void startSingleReadyDownload(int idx) {
+                  if (idx < 0 || idx >= vState.length || vState[idx] != ST_READY || rUrl == null || idx >= rUrl.length || rUrl[idx] == null) return;
+                  dlQueue.add(idx);
+                  if (mode == Mode.IDLE) {
+                      mode = Mode.DOWNLOAD;
+                      log("\nMengunduh: " + rName[idx]);
+                      setStatus("Mengunduh " + rName[idx] + " ...", Ui.AMBER);
+                  }
                   pump();
                   startTracker();
                   refreshUi();
@@ -5907,12 +6607,12 @@ jobs:
                   web.setDownloadListener((url, ua, disposition, mime, length) -> onWebDownload(url, disposition, mime, length));
               }
 
-              /** Total ukuran link yang siap diunduh, untuk tombol "Mulai unduh". Kosong jika belum ada yang diketahui. */
+              /** Total ukuran link yang dipilih untuk diunduh, untuk tombol "Mulai unduh". Kosong jika belum ada yang diketahui. */
               String readySizeLabel() {
                   long sum = 0;
                   int unknown = 0;
                   for (int i = 0; i < vState.length; i++) {
-                      if (vState[i] != ST_READY) continue;
+                      if (vState[i] != ST_READY || !dlSelected.contains(i)) continue;
                       Long sz = rSizes.get(i);
                       if (sz != null && sz > 0) sum += sz;
                       else unknown++;
@@ -5927,19 +6627,153 @@ jobs:
                   return "ukuran tidak diketahui";
               }
 
-              /** Hitung ukuran link yang sudah terkumpul (di latar belakang), lalu tampilkan di daftar sebelum diunduh. */
+              /** Hitung ukuran & ambil thumbnail link yang sudah terkumpul (di latar belakang), lalu tampilkan di daftar sebelum diunduh. */
               void measureLater(final int i, final String media, final String referer, final String name) {
                   final String ua = web.getSettings().getUserAgentString();
                   final String cookie = CookieManager.getInstance().getCookie(media);
                   final boolean hls = isHls(media);
+                  final String poster = rPoster.get(i);
                   bg.execute(() -> {
                       final long[] est = hls ? HlsDownloader.estimate(media, ua, referer)
                               : new long[]{probeSize(media, referer, ua, cookie), -1};
                       h.post(() -> {
                           if (i >= vState.length || vState[i] != ST_READY || rUrl == null || i >= rUrl.length || !media.equals(rUrl[i])) return;
                           if (est[0] > 0) rSizes.put(i, est[0]);
-                          setState(i, ST_READY, name + " \u00B7 " + sizeLabel(est, hls));
+                          if (est[1] > 0) rDurs.put(i, est[1]);
+                          setState(i, ST_READY, name);
                           refreshUi();
+                      });
+                  });
+                  fetchRemoteThumb(media, referer, ua, cookie, poster, i, null);
+              }
+
+              Bitmap placeholderThumb(int index) {
+                  int w = 320, h = 180;
+                  Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                  Canvas c = new Canvas(b);
+                  Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  p.setShader(new LinearGradient(0, 0, w, h, 0xFF0A1024, 0xFF16224A, Shader.TileMode.CLAMP));
+                  c.drawRect(0, 0, w, h, p);
+                  p.setShader(null);
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(2f);
+                  p.setColor(0x334FE3D4);
+                  c.drawCircle(w / 2f, h / 2f, 32f, p);
+                  p.setStyle(Paint.Style.FILL);
+                  p.setColor(0x884FE3D4);
+                  Path tri = new Path();
+                  float cx = w / 2f, cy = h / 2f;
+                  tri.moveTo(cx - 9f, cy - 13f);
+                  tri.lineTo(cx + 15f, cy);
+                  tri.lineTo(cx - 9f, cy + 13f);
+                  tri.close();
+                  c.drawPath(tri, p);
+                  return b;
+              }
+
+              Bitmap fetchImageBitmap(String imgUrl, String referer, String ua, String cookie) {
+                  if (imgUrl == null || !imgUrl.startsWith("http")) return null;
+                  HttpURLConnection c = null;
+                  try {
+                      c = (HttpURLConnection) new URL(imgUrl).openConnection();
+                      c.setConnectTimeout(8000);
+                      c.setReadTimeout(8000);
+                      c.setInstanceFollowRedirects(true);
+                      if (ua != null) c.setRequestProperty("User-Agent", ua);
+                      if (referer != null) c.setRequestProperty("Referer", referer);
+                      if (cookie != null) c.setRequestProperty("Cookie", cookie);
+                      if (c.getResponseCode() >= 400) return null;
+                      try (java.io.InputStream in = c.getInputStream()) {
+                          Bitmap raw = BitmapFactory.decodeStream(in);
+                          if (raw == null) return null;
+                          float sc = Math.min(1f, 320f / Math.max(1, raw.getWidth()));
+                          return Bitmap.createScaledBitmap(raw, Math.max(1, Math.round(raw.getWidth() * sc)),
+                                  Math.max(1, Math.round(raw.getHeight() * sc)), true);
+                      }
+                  } catch (Exception e) {
+                      return null;
+                  } finally {
+                      if (c != null) c.disconnect();
+                  }
+              }
+
+              void fetchRemoteThumb(final String mediaUrl, final String referer, final String ua, final String cookie,
+                                    final String posterUrl, final int rowIdx, final Runnable onDone) {
+                  if (mediaUrl == null) return;
+                  if (thumbs.get(mediaUrl) != null) {
+                      if (rowIdx >= 0) h.post(() -> paintRow(rowIdx));
+                      if (onDone != null) h.post(onDone);
+                      return;
+                  }
+                  bg.execute(() -> {
+                      Bitmap b = null;
+                      long durMs = -1;
+                      if (posterUrl != null && !posterUrl.isEmpty()) {
+                          b = thumbs.get(posterUrl);
+                          if (b == null) {
+                              b = fetchImageBitmap(posterUrl, referer, ua, CookieManager.getInstance().getCookie(posterUrl));
+                              if (b != null) thumbs.put(posterUrl, b);
+                          }
+                      }
+                      if (b == null && isHls(mediaUrl)) {
+                          File tmp = null;
+                          MediaMetadataRetriever r = new MediaMetadataRetriever();
+                          try {
+                              byte[] seg = HlsDownloader.sampleSegment(mediaUrl, ua, referer);
+                              if (seg != null && seg.length > 0) {
+                                  tmp = File.createTempFile("fcth_", ".ts", getCacheDir());
+                                  try ( java.io.FileOutputStream fos = new java.io.FileOutputStream(tmp)) {
+                                      fos.write(seg);
+                                  }
+                                  r.setDataSource(tmp.getAbsolutePath());
+                                  Bitmap f = r.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                                  if (f == null) f = r.getFrameAtTime();
+                                  if (f != null) {
+                                      float sc = Math.min(1f, 320f / Math.max(1, f.getWidth()));
+                                      b = Bitmap.createScaledBitmap(f, Math.max(1, Math.round(f.getWidth() * sc)),
+                                              Math.max(1, Math.round(f.getHeight() * sc)), true);
+                                  }
+                              }
+                          } catch (Exception ignored) {
+                          } finally {
+                              try { r.release(); } catch (Exception ignored) { }
+                              if (tmp != null) try { tmp.delete(); } catch (Exception ignored) { }
+                          }
+                      } else if (b == null) {
+                          MediaMetadataRetriever r = new MediaMetadataRetriever();
+                          try {
+                              Map<String, String> hdr = new HashMap<>();
+                              if (ua != null) hdr.put("User-Agent", ua);
+                              if (referer != null) hdr.put("Referer", referer);
+                              if (cookie != null) hdr.put("Cookie", cookie);
+                              r.setDataSource(mediaUrl, hdr);
+                              String dStr = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+                              if (dStr != null) {
+                                  try { durMs = Long.parseLong(dStr); } catch (Exception ignored) { }
+                              }
+                              long atUs = durMs > 6000 ? 2000000L : 0L;
+                              if (Build.VERSION.SDK_INT >= 27) {
+                                  b = r.getScaledFrameAtTime(atUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 320, 180);
+                              } else {
+                                  Bitmap f = r.getFrameAtTime(atUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                                  if (f != null) {
+                                      float sc = Math.min(1f, 320f / Math.max(1, f.getWidth()));
+                                      b = Bitmap.createScaledBitmap(f, Math.max(1, Math.round(f.getWidth() * sc)),
+                                              Math.max(1, Math.round(f.getHeight() * sc)), true);
+                                  }
+                              }
+                          } catch (Exception ignored) {
+                          } finally {
+                              try { r.release(); } catch (Exception ignored) { }
+                          }
+                      }
+                      final Bitmap fb = b;
+                      final long fDur = durMs;
+                      h.post(() -> {
+                          if (fb != null) thumbs.put(mediaUrl, fb);
+                          if (rowIdx >= 0 && fDur > 0 && !rDurs.containsKey(rowIdx)) rDurs.put(rowIdx, fDur);
+                          if (rowIdx >= 0) paintRow(rowIdx);
+                          if (onDone != null) onDone.run();
                       });
                   });
               }
@@ -5994,7 +6828,10 @@ jobs:
                       web.evaluateJavascript(JS_POLL, v -> {
                           if (s != sniffSeq || !sniffing) return;
                           try {
-                              JSONArray m = new JSONObject(v).optJSONArray("media");
+                              JSONObject jo = new JSONObject(v);
+                              String pst = jo.optString("poster", "");
+                              if (!pst.isEmpty()) sniffPoster = pst;
+                              JSONArray m = jo.optJSONArray("media");
                               if (m != null) for (int i = 0; i < m.length(); i++) {
                                   JSONArray it = m.optJSONArray(i);
                                   if (it != null) onSniff(it.optString(0, ""), true);
@@ -6013,11 +6850,13 @@ jobs:
                   String kind = isHls(u) ? "Stream HLS" : extOf(u).substring(1).toUpperCase(Locale.ROOT);
                   sniffed.put(u, new String[]{kind, "menghitung ukuran ...", ""});
                   renderSniff();
-                  if (mode == Mode.IDLE) setStatus(sniffed.size() + " video terdeteksi. Tekan Unduh di daftar Video terdeteksi.", Ui.ION);
+                  if (mode == Mode.IDLE) setStatus(sniffed.size() + " video terdeteksi. Pilih video yang ingin diunduh di bawah.", Ui.ION);
+                  final String ref = web.getUrl(), ua = web.getSettings().getUserAgentString();
+                  final String cookie = CookieManager.getInstance().getCookie(u);
+                  fetchRemoteThumb(u, ref, ua, cookie, sniffPoster, -1, this::renderSniff);
                   if (isHls(u)) {
-                      final String hRef = web.getUrl(), hUa = web.getSettings().getUserAgentString();
                       bg.execute(() -> {
-                          final long[] est = HlsDownloader.estimate(u, hUa, hRef);
+                          final long[] est = HlsDownloader.estimate(u, ua, ref);
                           h.post(() -> {
                               String[] e = sniffed.get(u);
                               if (e == null) return;
@@ -6027,8 +6866,6 @@ jobs:
                       });
                       return;
                   }
-                  final String ref = web.getUrl(), ua = web.getSettings().getUserAgentString();
-                  final String cookie = CookieManager.getInstance().getCookie(u);
                   bg.execute(() -> {
                       final long sz = probeSize(u, ref, ua, cookie);
                       h.post(() -> {
@@ -6050,26 +6887,46 @@ jobs:
                       sniffBox.addView(e);
                       return;
                   }
+                  int sIdx = 0;
                   for (final Map.Entry<String, String[]> en : sniffed.entrySet()) {
                       final String url = en.getKey();
                       final String[] info = en.getValue();
                       LinearLayout r = Ui.row(this);
-                      r.setBackground(Ui.box(this, Ui.PANEL, 10, 0));
-                      r.setPadding(dp(12), dp(10), dp(10), dp(10));
+                      r.setBackground(Ui.box(this, Ui.PANEL, 12, Ui.LINE));
+                      r.setPadding(dp(10), dp(10), dp(10), dp(10));
+
+                      ImageView th = thumbView();
+                      Bitmap b = thumbs.get(url);
+                      if (b == null && !sniffPoster.isEmpty()) b = thumbs.get(sniffPoster);
+                      th.setImageBitmap(b != null ? b : placeholderThumb(sIdx++));
+                      th.setOnClickListener(v -> {
+                          ArrayList<String> one = new ArrayList<>(), names = new ArrayList<>();
+                          one.add(url);
+                          names.add(sniffTitleFor(url));
+                          PlayerActivity.open(this, one, names, 0, web.getUrl(), web.getSettings().getUserAgentString());
+                      });
+                      r.addView(th, new LinearLayout.LayoutParams(dp(88), dp(50)));
+
                       LinearLayout mid = Ui.col(this);
-                      mid.addView(Ui.text(this, info[0] + " \u00B7 " + info[1], 14, Ui.TEXT, Ui.MEDIUM));
+                      mid.setPadding(dp(10), 0, dp(6), 0);
+                      TextView t = Ui.text(this, sniffTitleFor(url), 13.5f, Ui.TEXT, Ui.MEDIUM);
+                      t.setMaxLines(1);
+                      t.setEllipsize(TextUtils.TruncateAt.END);
+                      mid.addView(t);
+                      mid.addView(Ui.text(this, info[0] + " \u00B7 " + info[1], 12, Ui.ION, Ui.MEDIUM), Ui.fill(this, 2));
                       TextView link = Ui.hint(this, url);
+                      link.setTextSize(11);
                       link.setSingleLine(true);
                       link.setEllipsize(TextUtils.TruncateAt.MIDDLE);
                       mid.addView(link);
                       r.addView(mid, Ui.weight(1));
                       boolean added = "1".equals(info[2]);
-                      TextView dl = smallBtn(added ? "Ditambahkan" : "Unduh", added ? Ui.MUTED : Ui.ION);
+                      TextView dl = smallBtn(added ? "\u2713 Diunduh" : "\u2B07 Unduh", added ? Ui.MUTED : Ui.ION);
                       dl.setEnabled(!added);
                       LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                               ViewGroup.LayoutParams.WRAP_CONTENT);
-                      bl.leftMargin = dp(8);
-                      TextView play = smallBtn("Putar", Ui.ION);
+                      bl.leftMargin = dp(6);
+                      TextView play = smallBtn("\u25B6", Ui.ION);
                       r.addView(play, bl);
                       play.setOnClickListener(v -> {
                           ArrayList<String> one = new ArrayList<>(), names = new ArrayList<>();
@@ -6087,7 +6944,7 @@ jobs:
                               renderSniff();
                           }
                       });
-                      sniffBox.addView(r, Ui.fill(this, 6));
+                      sniffBox.addView(r, Ui.fill(this, 8));
                   }
               }
 
@@ -6154,6 +7011,7 @@ jobs:
                   rName[i] = name;
                   vState[i] = ST_READY;
                   vNote[i] = name;
+                  dlSelected.add(i);
                   buildRows();
                   dlQueue.add(i);
                   if (mode == Mode.IDLE) {
@@ -6202,6 +7060,9 @@ jobs:
                   videos.clear();
                   doneUri.clear();
                   rSizes.clear();
+                  rDurs.clear();
+                  rPoster.clear();
+                  dlSelected.clear();
                   foldersScanned = 0;
                   subfolderCount = 0;
                   scanTitle = null;
@@ -6371,8 +7232,9 @@ jobs:
                   }
                   buildRows();
                   showTab(0);
-                  setStatus(videos.size() + " video siap diunduh.", Ui.ION);
+                  setStatus(videos.size() + " video ditemukan. Mengumpulkan link, ukuran & thumbnail ...", Ui.AMBER);
                   refreshUi();
+                  startCollect();
               }
 
               static String lastSegment(String path) {
@@ -6461,10 +7323,11 @@ jobs:
                   int rd = countState(ST_READY), failedNow = countState(ST_FAIL);
                   log("\nTahap 1 selesai: " + rd + " link terkumpul, " + failedNow + " gagal.");
                   if (rd > 0 && autoBox.isChecked()) {
+                      selectAllReady(true);
                       startDownloads();
                   } else {
-                      setStatus(rd + " link terkumpul" + (failedNow > 0 ? ", " + failedNow + " gagal" : "")
-                              + (rd > 0 ? ". Tekan Mulai unduh." : "."), failedNow > 0 ? Ui.AMBER : Ui.ION);
+                      setStatus(rd + " link siap" + (failedNow > 0 ? ", " + failedNow + " gagal" : "")
+                              + (rd > 0 ? ". Pilih video di bawah lalu tekan Unduh." : "."), failedNow > 0 ? Ui.AMBER : Ui.ION);
                       refreshUi();
                   }
               }
@@ -6520,7 +7383,7 @@ jobs:
                   long lastNewCand, deadline;
                   int item = -1, pollCount, seq, stepSeq, retries;
                   boolean active, jumpedToIframe, earlyDecision, fastOff;
-                  String pageTitle;
+                  String pageTitle, pagePoster;
 
                   Worker(int slot, int total) {
                       this.slot = slot;
@@ -6648,6 +7511,7 @@ jobs:
                       earlyDecision = false;
                       fastOff = false;
                       pageTitle = null;
+                      pagePoster = null;
                       jumpedToIframe = false;
                       pollCount = 0;
                       deadline = System.currentTimeMillis() + CAPTURE_TIMEOUT_MS;
@@ -6710,6 +7574,8 @@ jobs:
                           List<String> iframes = new ArrayList<>();
                           try {
                               JSONObject o = new JSONObject(v);
+                              String pst = o.optString("poster", "");
+                              if (!pst.isEmpty() && pagePoster == null) pagePoster = pst;
                               JSONArray m = o.optJSONArray("media");
                               JSONArray f = o.optJSONArray("iframes");
                               if (m != null) for (int i = 0; i < m.length(); i++) {
@@ -6854,6 +7720,8 @@ jobs:
                           if (cs > bs || (cs == bs && d >= durs.get(best))) best = i;
                       }
                       if (best >= 0) {
+                          double bestDur = durs.get(best);
+                          if (bestDur > 0) rDurs.put(item, (long) (bestDur * 1000));
                           storeLink(urls.get(best), referer, sizes[best]);
                       } else if (earlyDecision && System.currentTimeMillis() < deadline) {
                           earlyDecision = false;
@@ -6886,11 +7754,16 @@ jobs:
                       rUrl[item] = media;
                       rRef[item] = referer;
                       rName[item] = name;
+                      dlSelected.add(item);
+                      if (pagePoster != null && !pagePoster.isEmpty()) rPoster.put(item, pagePoster);
                       ok++;
                       wl("   link siap: " + name + "\n     " + shorten(media));
                       if (size > 0) {
                           rSizes.put(item, size);
-                          setState(item, ST_READY, name + " \u00B7 " + fmtSize(size));
+                          setState(item, ST_READY, name);
+                          final String ua = wv.getSettings().getUserAgentString();
+                          final String ck = CookieManager.getInstance().getCookie(media);
+                          fetchRemoteThumb(media, referer, ua, ck, pagePoster, item, null);
                       } else {
                           setState(item, ST_READY, name + " \u00B7 menghitung ukuran ...");
                           measureLater(item, media, referer, name);
@@ -7827,6 +8700,9 @@ jobs:
                       rUrl = null;
                       doneUri.clear();
                       rSizes.clear();
+                      rDurs.clear();
+                      rPoster.clear();
+                      dlSelected.clear();
                       found.clear();
                       foldersScanned = 0;
                       historyUrl = "";
