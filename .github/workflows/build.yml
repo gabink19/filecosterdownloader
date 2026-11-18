@@ -2144,8 +2144,8 @@ jobs:
                       blp.topMargin = dp(10);
                       card.addView(body, blp);
 
-                      TextView ok = hudPillBtn("Tutup", Ui.ION_DEEP, Ui.ION, Ui.ION, 14);
-                      ok.setOnClickListener(v -> dlg.dismiss());
+              TextView ok = hudPillBtn("Tutup", Ui.ION_DEEP, Ui.ION, Ui.ION, 14);
+              ok.setOnClickListener(btnView -> dlg.dismiss());
                       LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                       olp.topMargin = dp(14);
                       card.addView(ok, olp);
@@ -4614,9 +4614,9 @@ jobs:
                   libSelCancelBtn = Ui.ghost(this, "✕");
                   libSelCancelBtn.setTextSize(12);
                   libSelCancelBtn.setPadding(dp(10), dp(6), dp(10), dp(6));
-                  LinearLayout.LayoutParams scl = Ui.lp(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                  scl.leftMargin = dp(6);
-                  libSelBar.addView(libSelCancelBtn, scl);
+                  LinearLayout.LayoutParams libSelCancelLp = Ui.lp(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  libSelCancelLp.leftMargin = dp(6);
+                  libSelBar.addView(libSelCancelBtn, libSelCancelLp);
                   libraryPane.addView(libSelBar, Ui.fill(this, 8));
                   libBox = Ui.col(this);
                   libraryPane.addView(libBox, Ui.fill(this, 12));
