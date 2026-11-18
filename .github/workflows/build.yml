@@ -1705,35 +1705,6 @@ jobs:
                       hudBarTrack.setVisibility(View.GONE);
                       root.addView(hudBox, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER));
 
-                      // Pusat transport HUD (Prev, -10, Play/Pause, +10, Next)
-                      centerHud = new LinearLayout(this);
-                      centerHud.setOrientation(LinearLayout.HORIZONTAL);
-                      centerHud.setGravity(Gravity.CENTER);
-                      centerHud.setClickable(false);
-
-                      prevBtn = circleHudBtn("\u23EE", 44, 0xCC0A1024, Ui.LINE, Ui.TEXT, 16);
-                      prevBtn.setOnClickListener(v -> skip(-1));
-
-                      TextView rewBtn = circleHudBtn("-10", 50, 0xCC121A35, Ui.LINE, Ui.TEXT, 13);
-                      rewBtn.setOnClickListener(v -> seekBy(-STEP_MS));
-
-                      playBtn = circleHudBtn("\u23F8", 68, 0xE60E3B46, Ui.ION, Ui.ION, 24);
-                      playBtn.setOnClickListener(v -> togglePlay());
-
-                      TextView fwdBtn = circleHudBtn("+10", 50, 0xCC121A35, Ui.LINE, Ui.TEXT, 13);
-                      fwdBtn.setOnClickListener(v -> seekBy(STEP_MS));
-
-                      nextBtn = circleHudBtn("\u23ED", 44, 0xCC0A1024, Ui.LINE, Ui.TEXT, 16);
-                      nextBtn.setOnClickListener(v -> skip(1));
-
-                      View[] cBtns = {prevBtn, rewBtn, playBtn, fwdBtn, nextBtn};
-                      for (int i = 0; i < cBtns.length; i++) {
-                          LinearLayout.LayoutParams clp = (LinearLayout.LayoutParams) cBtns[i].getLayoutParams();
-                          if (i > 0) clp.leftMargin = dp(14);
-                          centerHud.addView(cBtns[i], clp);
-                      }
-                      root.addView(centerHud, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER));
-
                       // Bilah atas futuristik
                       topBar = new LinearLayout(this);
                       topBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -1869,6 +1840,36 @@ jobs:
                       prow.addView(durView);
                       bottomBar.addView(prow);
 
+                      // Baris tombol transport (Prev, -10, Play/Pause, +10, Next) di bawah slider video
+                      centerHud = new LinearLayout(this);
+                      centerHud.setOrientation(LinearLayout.HORIZONTAL);
+                      centerHud.setGravity(Gravity.CENTER);
+
+                      prevBtn = circleHudBtn("\u23EE", 38, 0xCC0A1024, Ui.LINE, Ui.TEXT, 15);
+                      prevBtn.setOnClickListener(v -> skip(-1));
+
+                      TextView rewBtn = circleHudBtn("-10", 42, 0xCC121A35, Ui.LINE, Ui.TEXT, 12);
+                      rewBtn.setOnClickListener(v -> seekBy(-STEP_MS));
+
+                      playBtn = circleHudBtn("\u23F8", 52, 0xE60E3B46, Ui.ION, Ui.ION, 20);
+                      playBtn.setOnClickListener(v -> togglePlay());
+
+                      TextView fwdBtn = circleHudBtn("+10", 42, 0xCC121A35, Ui.LINE, Ui.TEXT, 12);
+                      fwdBtn.setOnClickListener(v -> seekBy(STEP_MS));
+
+                      nextBtn = circleHudBtn("\u23ED", 38, 0xCC0A1024, Ui.LINE, Ui.TEXT, 15);
+                      nextBtn.setOnClickListener(v -> skip(1));
+
+                      View[] cBtns = {prevBtn, rewBtn, playBtn, fwdBtn, nextBtn};
+                      for (int i = 0; i < cBtns.length; i++) {
+                          LinearLayout.LayoutParams clp = (LinearLayout.LayoutParams) cBtns[i].getLayoutParams();
+                          if (i > 0) clp.leftMargin = dp(14);
+                          centerHud.addView(cBtns[i], clp);
+                      }
+                      LinearLayout.LayoutParams crp = new LinearLayout.LayoutParams(MATCH, WRAP);
+                      crp.topMargin = dp(8);
+                      bottomBar.addView(centerHud, crp);
+
                       LinearLayout brow = new LinearLayout(this);
                       brow.setGravity(Gravity.CENTER_VERTICAL);
                       LinearLayout.LayoutParams brp = new LinearLayout.LayoutParams(MATCH, WRAP);
@@ -1920,7 +1921,7 @@ jobs:
                       resumeChip.setVisibility(View.GONE);
                       FrameLayout.LayoutParams rl = new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START | Gravity.BOTTOM);
                       rl.leftMargin = dp(16);
-                      rl.bottomMargin = dp(126);
+                      rl.bottomMargin = dp(186);
                       root.addView(resumeChip, rl);
 
                       // Tombol buka kunci layar
@@ -2892,11 +2893,9 @@ jobs:
                       if (controlsShown) {
                           fadeIn(topBar);
                           fadeIn(bottomBar);
-                          fadeIn(centerHud);
                       } else {
                           fadeOut(topBar);
                           fadeOut(bottomBar);
-                          fadeOut(centerHud);
                       }
                       h.removeCallbacks(hider);
                       if (controlsShown) {
