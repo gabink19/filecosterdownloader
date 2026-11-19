@@ -147,11 +147,11 @@
         ExoPlayer player;
         PlayerView pv;
         FrameLayout root;
-        LinearLayout topBar, bottomBar, centerHud, hudBox, quickFloatBar, topRightFloatBar;
+        LinearLayout topBar, bottomBar, centerHud, hudBox, seekHud, quickFloatBar, topRightFloatBar;
         TextView titleView, qualityBadge, posView, durView, playBtn, prevBtn, nextBtn, speedBtn;
-        TextView aspectBtn, orientBtn, repeatBtn, abQuickBtn, batteryView, hudText;
+        TextView aspectBtn, orientBtn, repeatBtn, abQuickBtn, batteryView, hudText, seekHudText;
         TextView unlockBtn, abBtn, resumeChip, speed2xBtn, floatLockBtn;
-        View hudBarTrack, hudBarFill;
+        View hudBarTrack, hudBarFill, seekHudBarTrack, seekHudBarFill;
         SeekBar seek;
 
         final List<String> uris = new ArrayList<>();
@@ -198,6 +198,7 @@
 
         final Runnable hider = () -> showControls(false);
         final Runnable hudHider = () -> fadeOut(hudBox);
+        final Runnable seekHudHider = () -> fadeOut(seekHud);
         final Runnable unlockHider = () -> unlockBtn.setVisibility(View.GONE);
         final Runnable chipHider = () -> resumeChip.setVisibility(View.GONE);
         final Runnable sleeper = () -> {
@@ -778,6 +779,34 @@
             root.addView(quickFloatBar, new FrameLayout.LayoutParams(WRAP, WRAP));
             layoutQuickFloatBar(getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE);
 
+            // Popup transparan di bawah (di atas kontrol) untuk umpan balik lompat waktu (+10/-10/+30/-30)
+            seekHud = new LinearLayout(this);
+            seekHud.setOrientation(LinearLayout.VERTICAL);
+            seekHud.setGravity(Gravity.CENTER);
+            seekHud.setBackground(pill(0x3D0A1024, 14, 0x554FE3D4));
+            seekHud.setPadding(dp(16), dp(8), dp(16), dp(8));
+            seekHud.setClickable(false);
+            seekHud.setFocusable(false);
+            seekHud.setVisibility(View.GONE);
+            seekHudText = label(14, 0xE6FFFFFF);
+            seekHudText.setTypeface(Ui.DISPLAY);
+            seekHudText.setGravity(Gravity.CENTER);
+            seekHud.addView(seekHudText);
+
+            LinearLayout seekTrack = new LinearLayout(this);
+            seekTrack.setBackground(pill(0x3326325E, 3, 0));
+            seekTrack.setWeightSum(100);
+            seekHudBarFill = new View(this);
+            seekHudBarFill.setBackground(pill(0x994FE3D4, 3, 0));
+            seekTrack.addView(seekHudBarFill, new LinearLayout.LayoutParams(0, dp(3), 50));
+            seekHudBarTrack = seekTrack;
+            LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(dp(120), dp(3));
+            stlp.topMargin = dp(6);
+            seekHud.addView(seekHudBarTrack, stlp);
+            seekHudBarTrack.setVisibility(View.GONE);
+            root.addView(seekHud, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+            updateSeekHudPosition();
+
             // Tombol Lock & Close mengambang transparan di pojok kanan atas (selalu muncul)
             topRightFloatBar = new LinearLayout(this);
             topRightFloatBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -877,6 +906,7 @@
                 rlp.bottomMargin = dp(landscape ? 186 : 240);
                 resumeChip.setLayoutParams(rlp);
             }
+            updateSeekHudPosition();
         }
 
         // ---------------- PEMUTAR ----------------
@@ -1127,7 +1157,7 @@
             lastSeekTarget = t;
             player.seekTo(t);
             int pct = d > 0 ? (int) (t * 100 / d) : -1;
-            showCenter((ms > 0 ? "+" : "-") + (Math.abs(ms) / 1000) + " dtk  (" + fmt(t) + ")", 700, pct);
+            showSeekHud((ms > 0 ? "+" : "-") + (Math.abs(ms) / 1000) + " dtk  (" + fmt(t) + ")", 700, pct);
         }
 
         void skip(int dir) {
@@ -1892,23 +1922,53 @@
                 updateBattery();
                 if (player != null && player.isPlaying()) h.postDelayed(hider, HIDE_MS);
             }
+            updateSeekHudPosition();
             immersive();
         }
 
-        void showCenter(String s, long ms, int percent) {
-            hudText.setText(s);
+        void updateHudContent(TextView text, View track, View fill, String s, int percent) {
+            text.setText(s);
             if (percent >= 0) {
                 int p = clamp(percent, 0, 100);
-                LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) hudBarFill.getLayoutParams();
+                LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) fill.getLayoutParams();
                 lp.weight = Math.max(1, p);
-                hudBarFill.setLayoutParams(lp);
-                if (hudBarTrack.getVisibility() != View.VISIBLE) hudBarTrack.setVisibility(View.VISIBLE);
-            } else if (hudBarTrack.getVisibility() != View.GONE) {
-                hudBarTrack.setVisibility(View.GONE);
+                fill.setLayoutParams(lp);
+                if (track.getVisibility() != View.VISIBLE) track.setVisibility(View.VISIBLE);
+            } else if (track.getVisibility() != View.GONE) {
+                track.setVisibility(View.GONE);
             }
+        }
+
+        void showCenter(String s, long ms, int percent) {
+            updateHudContent(hudText, hudBarTrack, hudBarFill, s, percent);
             fadeIn(hudBox);
             h.removeCallbacks(hudHider);
             if (ms > 0) h.postDelayed(hudHider, ms);
+        }
+
+        void updateSeekHudPosition() {
+            if (seekHud == null || !(seekHud.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+            boolean landscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+            int margin;
+            if (controlsShown && bottomBar != null && bottomBar.getVisibility() == View.VISIBLE) {
+                int hBar = bottomBar.getHeight();
+                margin = (hBar > 0 ? hBar : dp(landscape ? 165 : 225)) + dp(10);
+            } else {
+                margin = dp(landscape ? 24 : 74);
+            }
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) seekHud.getLayoutParams();
+            if (lp.bottomMargin != margin) {
+                lp.bottomMargin = margin;
+                seekHud.setLayoutParams(lp);
+            }
+        }
+
+        void showSeekHud(String s, long ms, int percent) {
+            updateSeekHudPosition();
+            updateHudContent(seekHudText, seekHudBarTrack, seekHudBarFill, s, percent);
+            fadeIn(seekHud);
+            h.removeCallbacks(seekHudHider);
+            if (ms > 0) h.postDelayed(seekHudHider, ms);
         }
 
         // ---------------- GESTUR ----------------
