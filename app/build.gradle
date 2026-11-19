@@ -1,0 +1,67 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Nomor build GitHub Actions = nomor rilis "build-N" di halaman Releases.
+// Dipakai aplikasi untuk mengecek apakah ada versi yang lebih baru.
+def runNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '0').toInteger()
+def updateRepo = System.getenv('GITHUB_REPOSITORY') ?: 'gabink19/filecosterdownloader'
+// Kunci tanda tangan tetap (dari GitHub Secrets). Tanpa ini setiap build punya tanda tangan
+// berbeda dan Android menolak memasang pembaruan di atas versi lama.
+def keystoreFile = System.getenv('SIGNING_KEYSTORE_FILE')
+
+android {
+    namespace 'com.example.fcdownloader'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.example.fcdownloader'
+        minSdk 24
+        targetSdk 34
+        versionCode 1000 + runNumber
+        versionName "3.2 (build ${runNumber})"
+        buildConfigField 'int', 'BUILD_NUMBER', "${runNumber}"
+        buildConfigField 'String', 'UPDATE_REPO', "\"${updateRepo}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        fixed {
+            if (keystoreFile) {
+                storeFile file(keystoreFile)
+                storePassword System.getenv('SIGNING_STORE_PASSWORD')
+                keyAlias System.getenv('SIGNING_KEY_ALIAS')
+                keyPassword System.getenv('SIGNING_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (keystoreFile) signingConfig signingConfigs.fixed
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    // pemutar video (ExoPlayer / Media3): mp4, mkv, webm, ts, flv, 3gp, HLS
+    implementation 'androidx.media3:media3-exoplayer:1.4.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.4.1'
+    implementation 'androidx.media3:media3-ui:1.4.1'
+    // DNS Google (DNS-over-HTTPS ke 8.8.8.8 / 8.8.4.4) untuk halaman web
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0'
+}
