@@ -189,10 +189,10 @@
         // gestur sentuh
         GestureDetector gd;
         ScaleGestureDetector sgd;
-        static final int G_NONE = 0, G_BRIGHT = 1, G_VOL = 2, G_SEEK = 3, G_ZOOM = 4;
+        static final int G_NONE = 0, G_BRIGHT = 1, G_SEEK = 3, G_ZOOM = 4;
         int gMode = G_NONE;
         float downX, downY;
-        float startBright, startVol, startBoost;
+        float startBright;
         long startPos, seekTarget = -1;
         int touchSlop;
 
@@ -459,7 +459,7 @@
                     if (gMode != G_NONE || player == null || !player.isPlaying()) return;
                     speedHeld = true;
                     player.setPlaybackSpeed(2f);
-                    showCenter("\u23E9 Kecepatan 2x", 0, -1);
+                    showSeekHud("\u23E9 Kecepatan 2x", 0, -1);
                 }
             });
             sgd = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -757,7 +757,7 @@
                                 player.setPlaybackSpeed(2f);
                             }
                             styleSpeed2xBtn(true);
-                            showCenter("\u23E9 Kecepatan 2x", 0, -1);
+                            showSeekHud("\u23E9 Kecepatan 2x", 0, -1);
                         }
                         return true;
                     case MotionEvent.ACTION_UP:
@@ -865,8 +865,8 @@
                 }
             }
             styleSpeed2xBtn(false);
-            h.removeCallbacks(hudHider);
-            h.postDelayed(hudHider, 300);
+            h.removeCallbacks(seekHudHider);
+            h.postDelayed(seekHudHider, 300);
         }
 
         void layoutQuickFloatBar(boolean landscape) {
@@ -1999,15 +1999,14 @@
                     gMode = G_NONE;
                     seekTarget = -1;
                     startPos = player == null ? 0 : player.getCurrentPosition();
-                    startVol = am.getStreamVolume(AudioManager.STREAM_MUSIC);
-                    startBoost = boostMb;
                     startBright = currentBrightness();
                     break;
                 case MotionEvent.ACTION_MOVE:
                     if (speedHeld) break;
                     float dx = e.getX() - downX, dy = e.getY() - downY;
                     if (gMode == G_NONE && (Math.abs(dx) > touchSlop || Math.abs(dy) > touchSlop)) {
-                        gMode = Math.abs(dx) > Math.abs(dy) ? G_SEEK : (downX < v.getWidth() / 2f ? G_BRIGHT : G_VOL);
+                        if (Math.abs(dx) > Math.abs(dy)) gMode = G_SEEK;
+                        else if (downX < v.getWidth() / 2f) gMode = G_BRIGHT;
                     }
                     if (gMode == G_BRIGHT) {
                         float b = Math.max(0.01f, Math.min(1f, startBright - dy / (v.getHeight() * 0.7f)));
@@ -2016,22 +2015,6 @@
                         getWindow().setAttributes(lp);
                         int pct = Math.round(b * 100);
                         showCenter("\u2600 Kecerahan " + pct + "%", 0, pct);
-                    } else if (gMode == G_VOL) {
-                        float total = maxVol + maxVol;
-                        float cur = startVol + (startBoost / MAX_BOOST_MB) * maxVol - (dy / (v.getHeight() * 0.7f)) * total;
-                        cur = Math.max(0f, Math.min(total, cur));
-                        if (cur <= maxVol) {
-                            am.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(cur), 0);
-                            setBoost(0);
-                            int pct = Math.round(cur * 100 / maxVol);
-                            showCenter("\uD83D\uDD0A Volume " + pct + "%", 0, pct);
-                        } else {
-                            am.setStreamVolume(AudioManager.STREAM_MUSIC, maxVol, 0);
-                            int mb = Math.round((cur - maxVol) / maxVol * MAX_BOOST_MB);
-                            setBoost(mb);
-                            int pct = 100 + mb * 100 / MAX_BOOST_MB;
-                            showCenter("\uD83D\uDD0A Volume " + pct + "%", 0, Math.min(100, pct / 2));
-                        }
                     } else if (gMode == G_SEEK && player != null && player.isCurrentMediaItemSeekable()) {
                         long dur = player.getDuration();
                         if (dur > 0) {
