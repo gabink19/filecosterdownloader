@@ -496,7 +496,10 @@
             tlp.topMargin = dp(8);
             hudBox.addView(hudBarTrack, tlp);
             hudBarTrack.setVisibility(View.GONE);
-            root.addView(hudBox, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER));
+            hudBox.setClickable(false);
+            hudBox.setFocusable(false);
+            root.addView(hudBox, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+            updateTopHudPosition(hudBox);
 
             // Bilah atas futuristik
             topBar = new LinearLayout(this);
@@ -779,7 +782,7 @@
             root.addView(quickFloatBar, new FrameLayout.LayoutParams(WRAP, WRAP));
             layoutQuickFloatBar(getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE);
 
-            // Popup transparan di bawah (di atas kontrol) untuk umpan balik lompat waktu (+10/-10/+30/-30)
+            // Popup transparan di atas (di bawah bilah atas saat kontrol tampil) untuk umpan balik lompat waktu (+10/-10/+30/-30) & kecepatan 2x
             seekHud = new LinearLayout(this);
             seekHud.setOrientation(LinearLayout.VERTICAL);
             seekHud.setGravity(Gravity.CENTER);
@@ -804,8 +807,8 @@
             stlp.topMargin = dp(6);
             seekHud.addView(seekHudBarTrack, stlp);
             seekHudBarTrack.setVisibility(View.GONE);
-            root.addView(seekHud, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
-            updateSeekHudPosition();
+            root.addView(seekHud, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+            updateTopHudPosition(seekHud);
 
             // Tombol Lock & Close mengambang transparan di pojok kanan atas (selalu muncul)
             topRightFloatBar = new LinearLayout(this);
@@ -906,7 +909,7 @@
                 rlp.bottomMargin = dp(landscape ? 186 : 240);
                 resumeChip.setLayoutParams(rlp);
             }
-            updateSeekHudPosition();
+            updateHudPositions();
         }
 
         // ---------------- PEMUTAR ----------------
@@ -1922,7 +1925,7 @@
                 updateBattery();
                 if (player != null && player.isPlaying()) h.postDelayed(hider, HIDE_MS);
             }
-            updateSeekHudPosition();
+            updateHudPositions();
             immersive();
         }
 
@@ -1940,31 +1943,36 @@
         }
 
         void showCenter(String s, long ms, int percent) {
+            updateTopHudPosition(hudBox);
             updateHudContent(hudText, hudBarTrack, hudBarFill, s, percent);
             fadeIn(hudBox);
             h.removeCallbacks(hudHider);
             if (ms > 0) h.postDelayed(hudHider, ms);
         }
 
-        void updateSeekHudPosition() {
-            if (seekHud == null || !(seekHud.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
-            boolean landscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        void updateTopHudPosition(View hud) {
+            if (hud == null || !(hud.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
             int margin;
-            if (controlsShown && bottomBar != null && bottomBar.getVisibility() == View.VISIBLE) {
-                int hBar = bottomBar.getHeight();
-                margin = (hBar > 0 ? hBar : dp(landscape ? 165 : 225)) + dp(10);
+            if (controlsShown && topBar != null && topBar.getVisibility() == View.VISIBLE) {
+                int hBar = topBar.getHeight();
+                margin = (hBar > 0 ? hBar : dp(70)) + dp(6);
             } else {
-                margin = dp(landscape ? 24 : 74);
+                margin = dp(16);
             }
-            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) seekHud.getLayoutParams();
-            if (lp.bottomMargin != margin) {
-                lp.bottomMargin = margin;
-                seekHud.setLayoutParams(lp);
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) hud.getLayoutParams();
+            if (lp.topMargin != margin) {
+                lp.topMargin = margin;
+                hud.setLayoutParams(lp);
             }
         }
 
+        void updateHudPositions() {
+            updateTopHudPosition(hudBox);
+            updateTopHudPosition(seekHud);
+        }
+
         void showSeekHud(String s, long ms, int percent) {
-            updateSeekHudPosition();
+            updateTopHudPosition(seekHud);
             updateHudContent(seekHudText, seekHudBarTrack, seekHudBarFill, s, percent);
             fadeIn(seekHud);
             h.removeCallbacks(seekHudHider);
