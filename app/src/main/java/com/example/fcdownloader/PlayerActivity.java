@@ -37,6 +37,7 @@
     import android.util.SparseLongArray;
     import android.view.GestureDetector;
     import android.view.Gravity;
+    import android.view.HapticFeedbackConstants;
     import android.view.MotionEvent;
     import android.view.PixelCopy;
     import android.view.ScaleGestureDetector;
@@ -736,22 +737,22 @@
             quickFloatBar = new LinearLayout(this);
             quickFloatBar.setGravity(Gravity.CENTER);
             quickFloatBar.setClickable(true);
-            quickFloatBar.setBackground(pill(0x3D0A1024, 24, 0x4426325E));
-            quickFloatBar.setPadding(dp(6), dp(5), dp(6), dp(5));
+            quickFloatBar.setBackground(pill(0x3D0A1024, 31, 0x4426325E));
+            quickFloatBar.setPadding(dp(8), dp(6), dp(8), dp(6));
 
-            TextView qRew30 = circleHudBtn("-30", 38, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 11.5f);
-            qRew30.setOnClickListener(v -> seekBy(-STEP_LONG_MS));
+            TextView qRew30 = circleHudBtn("-30", 50, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 15f);
+            qRew30.setOnClickListener(v -> { tapHaptic(v); seekBy(-STEP_LONG_MS); });
 
-            TextView qRew10 = circleHudBtn("-10", 38, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 11.5f);
-            qRew10.setOnClickListener(v -> seekBy(-STEP_MS));
+            TextView qRew10 = circleHudBtn("-10", 50, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 15f);
+            qRew10.setOnClickListener(v -> { tapHaptic(v); seekBy(-STEP_MS); });
 
-            TextView qFwd10 = circleHudBtn("+10", 38, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 11.5f);
-            qFwd10.setOnClickListener(v -> seekBy(STEP_MS));
+            TextView qFwd10 = circleHudBtn("+10", 50, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 15f);
+            qFwd10.setOnClickListener(v -> { tapHaptic(v); seekBy(STEP_MS); });
 
-            TextView qFwd30 = circleHudBtn("+30", 38, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 11.5f);
-            qFwd30.setOnClickListener(v -> seekBy(STEP_LONG_MS));
+            TextView qFwd30 = circleHudBtn("+30", 50, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 15f);
+            qFwd30.setOnClickListener(v -> { tapHaptic(v); seekBy(STEP_LONG_MS); });
 
-            speed2xBtn = circleHudBtn("2x", 38, 0x4D0A1024, 0x664FE3D4, Ui.ION, 11.5f);
+            speed2xBtn = circleHudBtn("2x", 50, 0x4D0A1024, 0x664FE3D4, Ui.ION, 15f);
             speed2xBg = (GradientDrawable) speed2xBtn.getBackground();
             speed2xBtn.setOnTouchListener((v, e) -> {
                 switch (e.getActionMasked()) {
@@ -761,6 +762,7 @@
                         v.setPressed(true);
                         if (!speedHeld) {
                             speedHeld = true;
+                            tapHaptic(v);
                             if (Math.abs(player.getPlaybackParameters().speed - 2f) > 0.01f) {
                                 player.setPlaybackSpeed(2f);
                             }
@@ -820,17 +822,17 @@
             topRightFloatBar.setOrientation(LinearLayout.HORIZONTAL);
             topRightFloatBar.setGravity(Gravity.CENTER);
             topRightFloatBar.setClickable(true);
-            topRightFloatBar.setBackground(pill(0x3D0A1024, 20, 0x4426325E));
-            topRightFloatBar.setPadding(dp(5), dp(4), dp(5), dp(4));
+            topRightFloatBar.setBackground(pill(0x3D0A1024, 26, 0x4426325E));
+            topRightFloatBar.setPadding(dp(6), dp(5), dp(6), dp(5));
 
-            floatLockBtn = circleHudBtn("\uD83D\uDD12", 34, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 13.5f);
-            floatLockBtn.setOnClickListener(v -> setLocked(!locked));
+            floatLockBtn = circleHudBtn("\uD83D\uDD12", 44, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 17.5f);
+            floatLockBtn.setOnClickListener(v -> { tapHaptic(v); setLocked(!locked); });
             topRightFloatBar.addView(floatLockBtn);
 
-            TextView floatCloseBtn = circleHudBtn("\u2715", 34, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 14f);
-            floatCloseBtn.setOnClickListener(v -> finish());
-            LinearLayout.LayoutParams fclp = new LinearLayout.LayoutParams(dp(34), dp(34));
-            fclp.leftMargin = dp(6);
+            TextView floatCloseBtn = circleHudBtn("\u2715", 44, 0x4D0A1024, 0x6626325E, 0xE6FFFFFF, 18f);
+            floatCloseBtn.setOnClickListener(v -> { tapHaptic(v); finish(); });
+            LinearLayout.LayoutParams fclp = new LinearLayout.LayoutParams(dp(44), dp(44));
+            fclp.leftMargin = dp(8);
             topRightFloatBar.addView(floatCloseBtn, fclp);
 
             FrameLayout.LayoutParams trlp = new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.END | Gravity.TOP);
@@ -854,6 +856,10 @@
                 }
             });
             setContentView(root);
+        }
+
+        void tapHaptic(View v) {
+            if (v != null) v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
         }
 
         void styleSpeed2xBtn(boolean active) {
@@ -894,8 +900,8 @@
             }
             quickFloatBar.setLayoutParams(lp);
 
-            int sz = dp(landscape ? 36 : 40);
-            int gap = dp(landscape ? 6 : 8);
+            int sz = dp(landscape ? 47 : 52);
+            int gap = dp(landscape ? 8 : 10);
             for (int i = 0; i < quickFloatBar.getChildCount(); i++) {
                 View child = quickFloatBar.getChildAt(i);
                 LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(sz, sz);
@@ -907,11 +913,11 @@
             }
 
             if (bottomBar != null) {
-                bottomBar.setPadding(dp(12), dp(24), dp(12), dp(landscape ? 12 : 70));
+                bottomBar.setPadding(dp(12), dp(24), dp(12), dp(landscape ? 12 : 84));
             }
             if (resumeChip != null && resumeChip.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams rlp = (FrameLayout.LayoutParams) resumeChip.getLayoutParams();
-                rlp.bottomMargin = dp(landscape ? 186 : 240);
+                rlp.bottomMargin = dp(landscape ? 186 : 254);
                 resumeChip.setLayoutParams(rlp);
             }
             updateHudPositions();
