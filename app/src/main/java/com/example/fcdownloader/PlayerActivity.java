@@ -171,7 +171,7 @@
         boolean locked;
         boolean userSeeking;
         boolean speedHeld;
-        int lastQuickOrient = -1;
+        int lastQuickOrient = -1, lastQuickW, lastQuickH;
         GradientDrawable speed2xBg;
         long lastSeekAt, lastSeekTarget = -1;
         boolean showRemaining;
@@ -885,15 +885,21 @@
 
         void layoutQuickFloatBar(boolean landscape) {
             if (quickFloatBar == null) return;
+            android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+            int rw = root != null && root.getWidth() > 0 ? root.getWidth() : (landscape ? Math.max(dm.widthPixels, dm.heightPixels) : Math.min(dm.widthPixels, dm.heightPixels));
+            int rh = root != null && root.getHeight() > 0 ? root.getHeight() : (landscape ? Math.min(dm.widthPixels, dm.heightPixels) : Math.max(dm.widthPixels, dm.heightPixels));
             int orient = landscape ? 1 : 0;
-            if (lastQuickOrient == orient) return;
+            if (lastQuickOrient == orient && lastQuickW == rw && lastQuickH == rh) return;
             lastQuickOrient = orient;
+            lastQuickW = rw;
+            lastQuickH = rh;
 
             quickFloatBar.setOrientation(landscape ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
             FrameLayout.LayoutParams lp;
             if (landscape) {
                 lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END | Gravity.CENTER_VERTICAL);
-                lp.rightMargin = dp(12);
+                lp.rightMargin = dp(12) + Math.round(rw * 0.05f);
+                lp.topMargin = Math.round(rh * 0.05f);
             } else {
                 lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
                 lp.bottomMargin = dp(14);
