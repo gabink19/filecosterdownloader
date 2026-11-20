@@ -383,6 +383,7 @@ public class MainActivity extends Activity {
         refreshUi();
         if (PinLock.isSet(this)) {
             AppLock.needLock = false;
+            AppLock.unlocked = false;
             showLock(PIN_UNLOCK);
         } else if (!prefs.getBoolean("pinAsked", false)) {
             showLock(PIN_NEW);          // tawarkan membuat PIN pada pembukaan pertama (bisa dilewati)
@@ -3431,7 +3432,7 @@ public class MainActivity extends Activity {
         updateBatteryStatus();
         // Aplikasi kembali dari latar belakang: PIN selalu diminta lagi (lihat AppLock). Proses yang
         // sedang berjalan tetap jalan di balik layar PIN.
-        if (AppLock.needLock) {
+        if (AppLock.needLock || (PinLock.isSet(this) && !AppLock.unlocked)) {
             AppLock.needLock = false;
             if (PinLock.isSet(this) && !(lockLayer.getVisibility() == View.VISIBLE && pinStage == PIN_UNLOCK)) {
                 showLock(PIN_UNLOCK);
@@ -4112,6 +4113,7 @@ public class MainActivity extends Activity {
                 // terbuka dengan profil kosong (decoy) yang memakai riwayat/daftar unduhan terpisah
                 // (lihat key() & applyProfile()), sehingga terlihat seperti aplikasi baru dipasang.
                 decoy = !PinLock.check(this, pin);
+                AppLock.unlocked = true;
                 hideLock();
                 applyProfile();
                 break;
@@ -4126,6 +4128,7 @@ public class MainActivity extends Activity {
                 if (pin.equals(pinFirst)) {
                     try {
                         PinLock.set(this, pin);
+                        AppLock.unlocked = true;
                         prefs.edit().putBoolean("pinAsked", true).apply();
                         setStatus("PIN aktif. PIN akan diminta setiap aplikasi dibuka.", Ui.ION);
                     } catch (Exception e) {

@@ -13,7 +13,7 @@ final class AppLock {
 
     static int started;
     static boolean registered;
-    static volatile boolean needLock, external;
+    static volatile boolean needLock, external, unlocked;
 
     private AppLock() { }
 
@@ -33,7 +33,10 @@ final class AppLock {
                     // Disengaja: membuka pemilih file / penginstal / browser dari dalam aplikasi tidak
                     // memicu PIN saat kembali (lihat expectExternal). Selain itu PIN selalu diminta lagi.
                     if (external) external = false;
-                    else needLock = true;
+                    else {
+                        needLock = true;
+                        unlocked = false;
+                    }
                 }
             }
 
@@ -41,7 +44,9 @@ final class AppLock {
             public void onActivityCreated(Activity a, Bundle b) { }
 
             @Override
-            public void onActivityResumed(Activity a) { }
+            public void onActivityResumed(Activity a) {
+                external = false;
+            }
 
             @Override
             public void onActivityPaused(Activity a) { }

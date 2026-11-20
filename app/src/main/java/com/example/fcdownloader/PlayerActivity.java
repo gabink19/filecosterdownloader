@@ -217,6 +217,11 @@
         @Override
         protected void onCreate(Bundle savedInstanceState) {
             super.onCreate(savedInstanceState);
+            AppLock.install(getApplication());
+            if (PinLock.isSet(this) && !AppLock.unlocked && !Intent.ACTION_VIEW.equals(getIntent().getAction())) {
+                redirectToPin();
+                return;
+            }
             requestWindowFeature(Window.FEATURE_NO_TITLE);
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             if (Build.VERSION.SDK_INT >= 28) {
@@ -2080,16 +2085,21 @@
             if (focus) immersive();
         }
 
+        void redirectToPin() {
+            Intent i = new Intent(this, MainActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            startActivity(i);
+            finish();
+        }
+
         @Override
         protected void onStart() {
             super.onStart();
-            if (AppLock.needLock && PinLock.isSet(this) && !Intent.ACTION_VIEW.equals(getIntent().getAction())) {
+            if (PinLock.isSet(this) && (AppLock.needLock || !AppLock.unlocked)
+                    && !Intent.ACTION_VIEW.equals(getIntent().getAction())) {
                 saveCurrent();
                 if (player != null) player.pause();
-                Intent i = new Intent(this, MainActivity.class);
-                i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                startActivity(i);
-                finish();
+                redirectToPin();
             }
         }
 
