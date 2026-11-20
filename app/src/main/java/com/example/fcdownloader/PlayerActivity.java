@@ -152,7 +152,7 @@
         TextView titleView, qualityBadge, posView, durView, playBtn, prevBtn, nextBtn, speedBtn;
         TextView aspectBtn, orientBtn, repeatBtn, abQuickBtn, batteryView, hudText, seekHudText;
         TextView unlockBtn, abBtn, resumeChip, speed2xBtn, floatLockBtn;
-        View hudBarTrack, hudBarFill, seekHudBarTrack, seekHudBarFill;
+        View hudBarTrack, hudBarFill, seekHudBarTrack, seekHudBarFill, privacyCurtain;
         SeekBar seek;
 
         final List<String> uris = new ArrayList<>();
@@ -218,6 +218,7 @@
         @Override
         protected void onCreate(Bundle savedInstanceState) {
             super.onCreate(savedInstanceState);
+            if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(false);
             AppLock.install(getApplication());
             if (PinLock.isSet(this) && !AppLock.unlocked && !Intent.ACTION_VIEW.equals(getIntent().getAction())) {
                 redirectToPin();
@@ -847,6 +848,11 @@
             FrameLayout.LayoutParams ul = new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START | Gravity.CENTER_VERTICAL);
             ul.leftMargin = dp(24);
             root.addView(unlockBtn, ul);
+
+            privacyCurtain = new View(this);
+            privacyCurtain.setBackgroundColor(Color.BLACK);
+            privacyCurtain.setVisibility(View.GONE);
+            root.addView(privacyCurtain, new FrameLayout.LayoutParams(MATCH, MATCH));
 
             root.addOnLayoutChangeListener((v, l, t, r, bt, ol, ot, or, ob) -> {
                 if (r - l != or - ol || bt - t != ob - ot) {
@@ -2119,6 +2125,23 @@
         public void onConfigurationChanged(Configuration newConfig) {
             super.onConfigurationChanged(newConfig);
             layoutQuickFloatBar(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE);
+        }
+
+        @Override
+        protected void onResume() {
+            super.onResume();
+            if (privacyCurtain != null) privacyCurtain.setVisibility(View.GONE);
+            if (pv != null) pv.setVisibility(View.VISIBLE);
+        }
+
+        @Override
+        protected void onPause() {
+            if (privacyCurtain != null) {
+                privacyCurtain.bringToFront();
+                privacyCurtain.setVisibility(View.VISIBLE);
+            }
+            if (pv != null) pv.setVisibility(View.INVISIBLE);
+            super.onPause();
         }
 
         @Override
