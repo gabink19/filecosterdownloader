@@ -1,6 +1,7 @@
     package com.example.fcdownloader;
 
     import android.app.Activity;
+    import android.app.AlertDialog;
     import android.app.Dialog;
     import android.content.ContentValues;
     import android.content.Context;
@@ -103,6 +104,9 @@
     import java.util.List;
     import java.util.Locale;
     import java.util.Map;
+
+    import org.json.JSONArray;
+    import org.json.JSONObject;
 
     /**
      * Pemutar video futuristik (ExoPlayer / Media3): MP4, MKV, WEBM, TS, FLV, 3GP, HLS.
@@ -518,7 +522,7 @@
             topBar.setPadding(dp(12), dp(12), dp(106), dp(22));
 
             TextView back = hudPillBtn("\u2190", 0xAA121A35, Ui.LINE, Ui.TEXT, 17);
-            back.setOnClickListener(v -> finish());
+            back.setOnClickListener(v -> handleBackExit());
             topBar.addView(back);
 
             LinearLayout titleCol = new LinearLayout(this);
@@ -1016,9 +1020,10 @@
 
                 @Override
                 public void onMediaItemTransition(MediaItem item, int reason) {
-                    if (curUri != null) {
-                        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) WatchStore.setDone(PlayerActivity.this, curUri, true);
-                        else if (curDur > 0) WatchStore.save(PlayerActivity.this, curUri, curPos, curDur);
+                    final String prevUri = curUri;
+                    if (prevUri != null) {
+                        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) WatchStore.setDone(PlayerActivity.this, prevUri, true);
+                        else if (curDur > 0) WatchStore.save(PlayerActivity.this, prevUri, curPos, curDur);
                     }
                     curUri = item == null ? null : item.mediaId;
                     curPos = curDur = 0;
@@ -1026,6 +1031,18 @@
                     updateAbButton();
                     updateTitle();
                     updateNavButtons();
+                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && prevUri != null && isLocalUri(Uri.parse(prevUri))) {
+                        final int prevIdx = uris.indexOf(prevUri);
+                        if (prevIdx >= 0) {
+                            final String prevTitle = prevIdx < titles.size() ? titles.get(prevIdx) : "Video sebelumnya";
+                            if (player != null) player.pause();
+                            promptDeleteWatched(prevTitle, prevUri, prevIdx, () -> {
+                                if (curUri != null) offerResume(curUri, true);
+                                if (player != null) player.play();
+                            });
+                            return;
+                        }
+                    }
                     if (curUri != null) offerResume(curUri, true);
                 }
 
@@ -1188,11 +1205,15 @@
 
         void skip(int dir) {
             if (player == null) return;
-            saveCurrent();
-            if (dir > 0 && player.hasNextMediaItem()) player.seekToNextMediaItem();
-            else if (dir < 0 && player.hasPreviousMediaItem() && player.getCurrentPosition() <= 3000) player.seekToPreviousMediaItem();
-            else if (dir < 0) player.seekTo(0);
-            else showCenter("Ini video terakhir", 900, -1);
+            if (dir > 0 && player.hasNextMediaItem()) switchToVideo(player.getCurrentMediaItemIndex() + 1);
+            else if (dir < 0 && player.hasPreviousMediaItem() && player.getCurrentPosition() <= 3000) {
+                switchToVideo(player.getCurrentMediaItemIndex() - 1);
+            } else if (dir < 0) {
+                saveCurrent();
+                player.seekTo(0);
+            } else {
+                showCenter("Ini video terakhir", 900, -1);
+            }
             showControls(true);
         }
 
@@ -1478,10 +1499,7 @@
                 WatchStore.Entry e = WatchStore.get(this, uris.get(i));
                 String mark = i == cur ? "\u25B6 " : (e != null && e.done ? "\u2713 " : (e != null && e.percent() > 0 ? e.percent() + "%  " : ""));
                 String suffix = i == cur ? "  \u2713" : "";
-                addItem(names, acts, mark + titles.get(i) + suffix, () -> {
-                    saveCurrent();
-                    player.seekTo(ii, 0);
-                });
+                addItem(names, acts, mark + titles.get(i) + suffix, () -> switchToVideo(ii));
             }
             showFuturisticMenu("Daftar Putar (" + uris.size() + ")", names, acts);
         }
@@ -2172,7 +2190,118 @@
                 h.postDelayed(unlockHider, 2500);
                 return;
             }
-            super.onBackPressed();
+            handleBackExit();
+        }
+
+        boolean isWatchedOver90(String uri) {
+            if (uri == null || !isLocalUri(Uri.parse(uri))) return false;
+            if (uri.equals(curUri) && player != null) {
+                if (player.getPlaybackState() == Player.STATE_ENDED) return true;
+                long d = player.getDuration();
+                long p = player.getCurrentPosition();
+                if (d > 0 && p * 100 / d > 90) return true;
+            }
+            WatchStore.Entry e = WatchStore.get(this, uri);
+            return e != null && e.percent() > 90;
+        }
+
+        void handleBackExit() {
+            saveCurrent();
+            if (player != null && isWatchedOver90(curUri)) {
+                final int idx = player.getCurrentMediaItemIndex();
+                final String uri = curUri;
+                final String title = idx >= 0 && idx < titles.size() ? titles.get(idx) : "Video ini";
+                player.pause();
+                promptDeleteWatched(title, uri, idx, this::finish);
+                return;
+            }
+            finish();
+        }
+
+        void switchToVideo(final int targetIdx) {
+            if (player == null || targetIdx < 0 || targetIdx >= uris.size()) return;
+            saveCurrent();
+            final int curIdx = player.getCurrentMediaItemIndex();
+            if (targetIdx != curIdx && isWatchedOver90(curUri)) {
+                final String uri = curUri;
+                final String title = curIdx >= 0 && curIdx < titles.size() ? titles.get(curIdx) : "Video ini";
+                player.pause();
+                promptDeleteWatched(title, uri, curIdx, () -> {
+                    if (uris.isEmpty()) {
+                        finish();
+                        return;
+                    }
+                    int adj = targetIdx;
+                    if (curIdx >= 0 && !uris.contains(uri) && targetIdx > curIdx) adj--;
+                    adj = clamp(adj, 0, uris.size() - 1);
+                    player.seekTo(adj, 0);
+                    player.play();
+                });
+                return;
+            }
+            player.seekTo(targetIdx, 0);
+            player.play();
+        }
+
+        void promptDeleteWatched(String title, final String uri, final int idx, final Runnable after) {
+            if (!getSharedPreferences("fc", MODE_PRIVATE).getBoolean("askdel90", true)) {
+                after.run();
+                return;
+            }
+            new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("Sudah ditonton >90%")
+                    .setMessage(title + "\n\nHapus video ini dari storage?")
+                    .setPositiveButton("Hapus dari storage", (d, w) -> {
+                        deleteWatchedVideo(idx, uri, true);
+                        after.run();
+                    })
+                    .setNegativeButton("Skip", (d, w) -> after.run())
+                    .setOnCancelListener(d -> after.run())
+                    .show();
+        }
+
+        void deleteWatchedVideo(int idx, String uri, boolean deleteFile) {
+            removeFromDownloads(uri);
+            WatchStore.setDone(this, uri, false);
+            if (deleteFile) {
+                boolean ok = deleteLocalFile(uri);
+                Toast.makeText(this, ok ? "Video dihapus dari daftar & storage" : "Dihapus dari daftar (file gagal dihapus)", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "Video dihapus dari daftar", Toast.LENGTH_SHORT).show();
+            }
+            if (idx >= 0 && idx < uris.size() && player != null && idx < player.getMediaItemCount()) {
+                uris.remove(idx);
+                if (idx < titles.size()) titles.remove(idx);
+                player.removeMediaItem(idx);
+            }
+        }
+
+        void removeFromDownloads(String uri) {
+            if (uri == null) return;
+            SharedPreferences fc = getSharedPreferences("fc", MODE_PRIVATE);
+            for (String k : new String[]{"downloads", "d_downloads"}) {
+                try {
+                    JSONArray old = new JSONArray(fc.getString(k, "[]"));
+                    JSONArray out = new JSONArray();
+                    boolean changed = false;
+                    for (int i = 0; i < old.length(); i++) {
+                        JSONObject o = old.optJSONObject(i);
+                        if (o != null && uri.equals(o.optString("uri"))) changed = true;
+                        else if (o != null) out.put(o);
+                    }
+                    if (changed) fc.edit().putString(k, out.toString()).apply();
+                } catch (Exception ignored) { }
+            }
+        }
+
+        boolean deleteLocalFile(String uri) {
+            try {
+                Uri u = Uri.parse(uri);
+                if ("file".equalsIgnoreCase(u.getScheme())) return u.getPath() != null && new File(u.getPath()).delete();
+                return getContentResolver().delete(u, null, null) > 0;
+            } catch (Exception e) {
+                return false;
+            }
         }
 
         static boolean isLocalUri(Uri uri) {

@@ -245,7 +245,7 @@ public class MainActivity extends Activity {
     boolean loadingPrefs = true;
     TextView darkOverlay;
     boolean paused;
-    CheckBox adBox, subBox, dnsBox;
+    CheckBox adBox, subBox, dnsBox, askDelWatchedBox;
     Spinner saveSpin;
     EditText folderPatternInput;
     Spinner baseSpin;
@@ -311,13 +311,13 @@ public class MainActivity extends Activity {
     final List<TextView> rowSizeBadges = new ArrayList<>();
     final List<TextView> rowDurBadges = new ArrayList<>();
     LinearLayout dlSelBar;
-    TextView dlSelInfo, dlSelAllBtn, dlSelNoneBtn;
+    TextView dlSelInfo, dlSelAllBtn, dlSelNoneBtn, dlSelGoBtn;
     String sniffPoster = "";
     static final int MAX_LIBRARY = 150;
     static final int REQ_OPEN_FILE = 5;
     static final int MAX_DOWNLOADS = 500;
     LinearLayout libraryPane, libBox, libSelBar;
-    TextView tabPlayer, libViewBtn, libOpenBtn, libSelectBtn, libSelCount, libSelAllBtn, libSelDelBtn, libSelCancelBtn;
+    TextView tabPlayer, libViewBtn, libOpenBtn, libSelectBtn, libCleanBtn, libSelCount, libSelAllBtn, libSelDelBtn, libSelCancelBtn;
     final List<String[]> libItems = new ArrayList<>();   // {uri, nama, info}
     final Set<String> libSelected = new HashSet<>();
     int libSeq;
@@ -434,7 +434,7 @@ public class MainActivity extends Activity {
         getWindow().setBackgroundDrawable(new ColorDrawable(Ui.ABYSS));
         final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT, WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
 
-        // ===== tiga halaman: Unduh, Video saya, Lainnya =====
+        // ===== empat halaman: Unduh, Video saya, Riwayat, Lainnya =====
         LinearLayout root = Ui.col(this);
         root.setPadding(dp(16), dp(14), dp(16), dp(24));
         pageHome = Ui.col(this);
@@ -524,7 +524,7 @@ public class MainActivity extends Activity {
         linkCard.addView(srow, Ui.fill(this, 14));
         pageHome.addView(linkCard, Ui.fill(this, 14));
 
-        // tab History: berisi Terakhir dibuka
+        // tab History: berisi Terakhir dibuka & Riwayat link
         pageHistory.addView(Ui.text(this, "History", 26, Ui.TEXT, Ui.DISPLAY));
         recentCard = Ui.card(this, false);
         recentCard.addView(Ui.title(this, "Terakhir dibuka"));
@@ -534,6 +534,21 @@ public class MainActivity extends Activity {
         recentBox = Ui.col(this);
         recentCard.addView(recentBox, Ui.fill(this, 6));
         pageHistory.addView(recentCard, Ui.fill(this, 14));
+
+        // riwayat link
+        LinearLayout hist = Ui.card(this, false);
+        tabHistory = Ui.title(this, "Riwayat");
+        hist.addView(tabHistory);
+        historyPane = Ui.col(this);
+        clearHistoryBtn = Ui.ghost(this, "Hapus semua riwayat");
+        clearHistoryBtn.setTextSize(13);
+        LinearLayout.LayoutParams chl = new LinearLayout.LayoutParams(WRAP, WRAP);
+        chl.gravity = Gravity.END;
+        historyPane.addView(clearHistoryBtn, chl);
+        historyBox = Ui.col(this);
+        historyPane.addView(historyBox, Ui.fill(this, 8));
+        hist.addView(historyPane, Ui.fill(this, 6));
+        pageHistory.addView(hist, Ui.fill(this, 12));
 
         // kemajuan (hanya saat bekerja / ada daftar)
         progressCard = Ui.card(this, true);
@@ -636,6 +651,15 @@ public class MainActivity extends Activity {
         dsnLp.leftMargin = dp(6);
         dlSelNoneBtn.setOnClickListener(v -> selectAllReady(false));
         dlSelBar.addView(dlSelNoneBtn, dsnLp);
+        dlSelGoBtn = Ui.text(this, "\u2B07 Unduh", 12, Ui.ABYSS, Ui.DISPLAY);
+        dlSelGoBtn.setBackground(Ui.box(this, Ui.ION, 8, 0));
+        dlSelGoBtn.setPadding(dp(10), dp(6), dp(10), dp(6));
+        dlSelGoBtn.setClickable(true);
+        dlSelGoBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams dsgLp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        dsgLp.leftMargin = dp(6);
+        dlSelGoBtn.setOnClickListener(v -> startDownloads());
+        dlSelBar.addView(dlSelGoBtn, dsgLp);
         listCard.addView(dlSelBar, Ui.fill(this, 10));
         listBox = Ui.col(this);
         emptyList = Ui.hint(this, "Belum ada video.");
@@ -675,6 +699,12 @@ public class MainActivity extends Activity {
         lsl.leftMargin = dp(6);
         lbtn.addView(libSelectBtn, lsl);
         libraryPane.addView(lbtn, Ui.fill(this, 8));
+        libCleanBtn = Ui.ghost(this, "Hapus video >90% ditonton");
+        libCleanBtn.setTextSize(13);
+        libCleanBtn.setTextColor(Ui.PULSE);
+        libCleanBtn.setBackground(Ui.box(this, Ui.ABYSS, 10, Ui.PULSE));
+        libCleanBtn.setVisibility(View.GONE);
+        libraryPane.addView(libCleanBtn, Ui.fill(this, 8));
         libSelBar = Ui.row(this);
         libSelBar.setBackground(Ui.box(this, Ui.PANEL_HI, 10, Ui.ION));
         libSelBar.setPadding(dp(10), dp(8), dp(10), dp(8));
@@ -744,6 +774,9 @@ public class MainActivity extends Activity {
         dnsBox = Ui.check(this, "Buka situs yang diblokir provider (DNS Google 8.8.8.8)", prefs.getBoolean("dns", true));
         Net.enabled = dnsBox.isChecked();
         basic.addView(dnsBox, Ui.fill(this, 4));
+        askDelWatchedBox = Ui.check(this, "Tanyakan hapus video setelah ditonton >90%",
+                prefs.getBoolean("askdel90", true));
+        basic.addView(askDelWatchedBox, Ui.fill(this, 4));
         pageMore.addView(basic, Ui.fill(this, 14));
 
         // keamanan
@@ -777,21 +810,6 @@ public class MainActivity extends Activity {
         autoUpdateBox = Ui.check(this, "Periksa pembaruan otomatis", prefs.getBoolean("autoupd", true));
         upd.addView(autoUpdateBox, Ui.fill(this, 6));
         pageMore.addView(upd, Ui.fill(this, 12));
-
-        // riwayat link
-        LinearLayout hist = Ui.card(this, false);
-        tabHistory = Ui.title(this, "Riwayat");
-        hist.addView(tabHistory);
-        historyPane = Ui.col(this);
-        clearHistoryBtn = Ui.ghost(this, "Hapus semua riwayat");
-        clearHistoryBtn.setTextSize(13);
-        LinearLayout.LayoutParams chl = new LinearLayout.LayoutParams(WRAP, WRAP);
-        chl.gravity = Gravity.END;
-        historyPane.addView(clearHistoryBtn, chl);
-        historyBox = Ui.col(this);
-        historyPane.addView(historyBox, Ui.fill(this, 8));
-        hist.addView(historyPane, Ui.fill(this, 6));
-        pageMore.addView(hist, Ui.fill(this, 12));
 
         // pengaturan lanjutan (dilipat)
         LinearLayout adv = Ui.card(this, false);
@@ -918,6 +936,10 @@ public class MainActivity extends Activity {
         darkBtn.setOnClickListener(v -> setDark(true));
         mainBtn.setOnClickListener(v -> onMainAction());
         secBtn.setOnClickListener(v -> {
+            if (mode == Mode.CAPTURE) {
+                if (selectedReadyCount() > 0) startDownloads();
+                return;
+            }
             if (countState(ST_READY) > 0 && pendingCount() > 0) startCollect();
             else startScan();
         });
@@ -958,9 +980,11 @@ public class MainActivity extends Activity {
         });
         libOpenBtn.setOnClickListener(v -> openVideoFile());
         libSelectBtn.setOnClickListener(v -> setLibSelectMode(!libSelectMode));
+        libCleanBtn.setOnClickListener(v -> confirmDeleteWatched90());
         libSelCancelBtn.setOnClickListener(v -> setLibSelectMode(false));
         libSelAllBtn.setOnClickListener(v -> toggleSelectAllLibrary());
         libSelDelBtn.setOnClickListener(v -> confirmDeleteSelected());
+        askDelWatchedBox.setOnCheckedChangeListener((bt, on) -> saveSettings());
         pinSetBtn.setOnClickListener(v -> showLock(PinLock.isSet(this) ? PIN_OLD_CHANGE : PIN_NEW));
         pinOffBtn.setOnClickListener(v -> showLock(PIN_OLD_REMOVE));
         updateBtn.setOnClickListener(v -> startUpdate());
@@ -1083,7 +1107,7 @@ public class MainActivity extends Activity {
             toggleLog(true);           // catatan dibuka, tanpa memindahkan halaman
             return;
         }
-        showPage(which == 3 ? PAGE_VIDEOS : (which == 2 ? PAGE_MORE : PAGE_HOME));
+        showPage(which == 3 ? PAGE_VIDEOS : (which == 2 ? PAGE_HISTORY : PAGE_HOME));
     }
 
     void showPage(int page) {
@@ -1105,7 +1129,7 @@ public class MainActivity extends Activity {
         if (navBar != null) navBar.setSelectedIndex(page, changed);
         if (changed) mainScroll.scrollTo(0, 0);
         if (page == PAGE_VIDEOS) loadLibrary();
-        if (page == PAGE_HISTORY || page == PAGE_MORE) renderHistory();
+        if (page == PAGE_HISTORY) renderHistory();
     }
 
     TextView navItem(String icon, String label) {
@@ -1296,6 +1320,7 @@ public class MainActivity extends Activity {
                 .putInt("col", colSpin.getSelectedItemPosition())
                 .putBoolean("darkweb", darkWebBox.isChecked())
                 .putBoolean("autoupd", autoUpdateBox.isChecked())
+                .putBoolean("askdel90", askDelWatchedBox.isChecked())
                 .apply();
     }
 
@@ -1509,6 +1534,11 @@ public class MainActivity extends Activity {
                 dlSelInfo.setText("\u2713 " + selReady + " / " + ready + " video dipilih" + readySizeLabel());
                 dlSelAllBtn.setText(selReady >= ready ? "Semua terpilih" : "Pilih semua (" + ready + ")");
             }
+            if (dlSelGoBtn != null) {
+                boolean canEarlyDl = selReady > 0 && (mode == Mode.IDLE || mode == Mode.CAPTURE || mode == Mode.DOWNLOAD);
+                dlSelGoBtn.setVisibility(canEarlyDl ? View.VISIBLE : View.GONE);
+                if (canEarlyDl) dlSelGoBtn.setText("\u2B07 Unduh (" + selReady + ")");
+            }
         }
 
         if (mode == Mode.SCAN) {
@@ -1520,7 +1550,7 @@ public class MainActivity extends Activity {
                 ring.setProgress(0, 0, 0);
                 ring.setCenter("0", "belum ada video");
             } else if (mode == Mode.CAPTURE) {
-                ring.setProgress(0, (float) ready / total, (float) failed / total);
+                ring.setProgress((float) done / total, (float) ready / total, (float) failed / total);
                 ring.setCenter(String.valueOf(ready), "dari " + total + " link");
             } else {
                 float t = total;
@@ -1558,8 +1588,15 @@ public class MainActivity extends Activity {
             mainBtn.setText("\uD83D\uDD0D  Pindai folder & dapatkan link");
             Ui.stylePrimary(this, mainBtn, Ui.ION, Ui.ABYSS);
         }
-        secBtn.setText(ready > 0 && pending > 0 ? "Ambil " + pending + " link yang belum" : "Pindai ulang folder");
-        secBtn.setVisibility(mode == Mode.IDLE && (pending > 0 || ready > 0) ? View.VISIBLE : View.GONE);
+        if (mode == Mode.CAPTURE && selReady > 0) {
+            secBtn.setText("\u2B07  Unduh " + selReady + " video terpilih" + readySizeLabel());
+            Ui.stylePrimary(this, secBtn, Ui.ION, Ui.ABYSS);
+            secBtn.setVisibility(View.VISIBLE);
+        } else {
+            secBtn.setText(ready > 0 && pending > 0 ? "Ambil " + pending + " link yang belum" : "Pindai ulang folder");
+            styleGhost(this, secBtn);
+            secBtn.setVisibility(mode == Mode.IDLE && (pending > 0 || ready > 0) ? View.VISIBLE : View.GONE);
+        }
         singleBtn.setVisibility(View.GONE);
         // Tampilan sederhana: saat tidak ada pekerjaan folder, "Cari video" jadi tombol utama.
         boolean folderWork = mode == Mode.SCAN || mode == Mode.CAPTURE || ready > 0 || pending > 0
@@ -1793,7 +1830,7 @@ public class MainActivity extends Activity {
     }
 
     void stopCapture() {
-        mode = Mode.IDLE;
+        mode = hasActiveDownloads() ? Mode.DOWNLOAD : Mode.IDLE;
         paused = false;
         for (Worker w : workers) {
             if (w.active && w.item >= 0 && w.item < vState.length && vState[w.item] == ST_SEARCH) setState(w.item, ST_WAIT, "");
@@ -1802,11 +1839,19 @@ public class MainActivity extends Activity {
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         int rd = countState(ST_READY);
         log("\nPengumpulan link dihentikan. " + rd + " link sudah terkumpul.");
-        setStatus("Dihentikan. " + rd + " link sudah terkumpul dan siap diunduh.", Ui.AMBER);
+        if (mode == Mode.DOWNLOAD) {
+            setStatus("Pengumpulan link dihentikan. Melanjutkan unduhan yang sedang berjalan ...", Ui.AMBER);
+        } else {
+            setStatus("Dihentikan. " + rd + " link sudah terkumpul dan siap diunduh.", Ui.AMBER);
+        }
         refreshUi();
     }
 
     // ---------------- TAHAP 2: UNDUH MASSAL ----------------
+
+    boolean hasActiveDownloads() {
+        return !dlQueue.isEmpty() || activeDownloads() > 0;
+    }
 
     int maxParallel() {
         return PAR_VALUES[parSpin.getSelectedItemPosition()];
@@ -1814,14 +1859,22 @@ public class MainActivity extends Activity {
 
     /** Mulai mengunduh video yang dipilih dari link yang sudah terkumpul, tanpa membuka halaman web lagi. */
     void startDownloads() {
-        dlQueue.clear();
+        int added = 0;
         for (int i = 0; i < vState.length; i++) {
-            if (vState[i] == ST_READY && dlSelected.contains(i) && rUrl != null && i < rUrl.length && rUrl[i] != null) dlQueue.add(i);
+            if (vState[i] == ST_READY && dlSelected.contains(i) && rUrl != null && i < rUrl.length && rUrl[i] != null
+                    && !dlQueue.contains(i)) {
+                dlQueue.add(i);
+                added++;
+            }
         }
-        if (dlQueue.isEmpty()) return;
-        mode = Mode.DOWNLOAD;
-        log("\nTahap 2: mengunduh " + dlQueue.size() + " video terpilih, maksimal " + maxParallel() + " sekaligus.");
-        setStatus("Mengunduh " + dlQueue.size() + " video terpilih ...", Ui.AMBER);
+        if (added == 0) return;
+        if (mode == Mode.CAPTURE) {
+            log("\nUnduhan lebih awal: " + added + " video terpilih ditambahkan ke antrean (pencarian link tetap berjalan).");
+        } else {
+            mode = Mode.DOWNLOAD;
+            log("\nTahap 2: mengunduh " + dlQueue.size() + " video terpilih, maksimal " + maxParallel() + " sekaligus.");
+            setStatus("Mengunduh " + dlQueue.size() + " video terpilih ...", Ui.AMBER);
+        }
         pump();
         startTracker();
         refreshUi();
@@ -1829,11 +1882,13 @@ public class MainActivity extends Activity {
 
     void startSingleReadyDownload(int idx) {
         if (idx < 0 || idx >= vState.length || vState[idx] != ST_READY || rUrl == null || idx >= rUrl.length || rUrl[idx] == null) return;
-        dlQueue.add(idx);
+        if (!dlQueue.contains(idx)) dlQueue.add(idx);
         if (mode == Mode.IDLE) {
             mode = Mode.DOWNLOAD;
             log("\nMengunduh: " + rName[idx]);
             setStatus("Mengunduh " + rName[idx] + " ...", Ui.AMBER);
+        } else if (mode == Mode.CAPTURE) {
+            log("   mulai unduh lebih awal: " + rName[idx]);
         }
         pump();
         startTracker();
@@ -1842,9 +1897,9 @@ public class MainActivity extends Activity {
 
     /** Isi slot unduhan yang kosong dari antrean. */
     void pump() {
-        if (mode != Mode.DOWNLOAD) return;
+        if (mode != Mode.DOWNLOAD && mode != Mode.CAPTURE) return;
         while (!dlQueue.isEmpty() && activeDownloads() < maxParallel()) beginDownload(dlQueue.poll());
-        if (dlQueue.isEmpty() && activeDownloads() == 0) finishDownloads();
+        if (mode == Mode.DOWNLOAD && dlQueue.isEmpty() && activeDownloads() == 0) finishDownloads();
     }
 
     /** Unduhan yang sedang berjalan: lewat DownloadManager + stream m3u8 yang diunduh aplikasi sendiri. */
@@ -1853,6 +1908,7 @@ public class MainActivity extends Activity {
     }
 
     void beginDownload(int i) {
+        dlSelected.remove(i);
         if (rUrl[i] != null && isHls(rUrl[i])) {
             beginHls(i);
             return;
@@ -1947,7 +2003,7 @@ public class MainActivity extends Activity {
     }
 
     void finishDownloads() {
-        mode = Mode.IDLE;
+        if (mode != Mode.CAPTURE) mode = Mode.IDLE;
         int done = countState(ST_DONE), failed = countState(ST_FAIL);
         log("\nTahap 2 selesai: " + done + " berhasil, " + failed + " gagal. File ada di " + destLabel() + ".");
         updateHistoryResult();
@@ -1958,7 +2014,7 @@ public class MainActivity extends Activity {
 
     void stopDownloads() {
         dlQueue.clear();
-        mode = Mode.IDLE;
+        if (mode != Mode.CAPTURE) mode = Mode.IDLE;
         int rd = countState(ST_READY);
         log("\nAntrean dihentikan. Unduhan yang sedang berjalan tetap diselesaikan.");
         setStatus("Antrean dihentikan." + (rd > 0 ? " " + rd + " video belum diunduh." : ""), Ui.AMBER);
@@ -2850,6 +2906,10 @@ public class MainActivity extends Activity {
         if (rd > 0 && autoBox.isChecked()) {
             selectAllReady(true);
             startDownloads();
+        } else if (hasActiveDownloads()) {
+            mode = Mode.DOWNLOAD;
+            setStatus("Pengumpulan link selesai. Melanjutkan unduhan yang sedang berjalan ...", Ui.AMBER);
+            refreshUi();
         } else {
             setStatus(rd + " link siap" + (failedNow > 0 ? ", " + failedNow + " gagal" : "")
                     + (rd > 0 ? ". Pilih video di bawah lalu tekan Unduh." : "."), failedNow > 0 ? Ui.AMBER : Ui.ION);
@@ -3818,6 +3878,11 @@ public class MainActivity extends Activity {
 
     void updateLibSelectionBar() {
         if (libSelBar == null || libSelectBtn == null) return;
+        if (libCleanBtn != null) {
+            int over90 = watchedOver90Uris().size();
+            libCleanBtn.setVisibility(over90 > 0 && !libSelectMode ? View.VISIBLE : View.GONE);
+            if (over90 > 0) libCleanBtn.setText("\uD83D\uDDD1  Hapus video >90% ditonton (" + over90 + ")");
+        }
         libSelectBtn.setText(libSelectMode ? "Selesai" : "Pilih");
         libSelectBtn.setTextColor(libSelectMode ? Ui.ION : Ui.TEXT);
         libSelectBtn.setBackground(Ui.box(this, libSelectMode ? Ui.ION_DEEP : Ui.PANEL, 10, libSelectMode ? Ui.ION : Ui.LINE));
@@ -3845,36 +3910,60 @@ public class MainActivity extends Activity {
         renderLibrary(null);
     }
 
-    void confirmDeleteSelected() {
-        if (libSelected.isEmpty()) return;
-        final int total = libSelected.size();
+    Set<String> watchedOver90Uris() {
+        Set<String> out = new LinkedHashSet<>();
+        for (String[] it : libItems) {
+            WatchStore.Entry e = WatchStore.get(this, it[0]);
+            if (e != null && e.percent() > 90) out.add(it[0]);
+        }
+        return out;
+    }
+
+    void deleteLibraryTargets(Set<String> targets, boolean deleteFiles) {
+        if (targets.isEmpty()) return;
+        removeDownloads(key("downloads"), targets);
+        int okCount = 0, failCount = 0;
+        for (String u : targets) {
+            thumbs.remove(u);
+            if (deleteFiles) {
+                if (deleteVideoFileSilent(u)) okCount++;
+                else failCount++;
+            }
+        }
+        libSelected.removeAll(targets);
+        if (libSelected.isEmpty()) libSelectMode = false;
+        if (deleteFiles) {
+            String msg = okCount + " video dihapus dari daftar & storage";
+            if (failCount > 0) msg += " (" + failCount + " gagal dari storage)";
+            setStatus(msg, failCount == 0 ? Ui.ION : Ui.AMBER);
+        } else {
+            setStatus(targets.size() + " video dihapus dari daftar.", Ui.ION);
+        }
+        loadLibrary();
+    }
+
+    void confirmDeleteTargets(final Set<String> targets, String title) {
+        if (targets.isEmpty()) return;
         String[] opts = {"Hapus dari daftar saja", "Hapus dari daftar dan storage"};
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Hapus " + total + " video?")
-                .setItems(opts, (d, w) -> {
-                    Set<String> targets = new HashSet<>(libSelected);
-                    removeDownloads(key("downloads"), targets);
-                    int okCount = 0, failCount = 0;
-                    for (String u : targets) {
-                        thumbs.remove(u);
-                        if (w == 1) {
-                            if (deleteVideoFileSilent(u)) okCount++;
-                            else failCount++;
-                        }
-                    }
-                    libSelected.clear();
-                    libSelectMode = false;
-                    if (w == 1) {
-                        String msg = okCount + " video dihapus dari daftar & storage";
-                        if (failCount > 0) msg += " (" + failCount + " gagal dari storage)";
-                        setStatus(msg, failCount == 0 ? Ui.ION : Ui.AMBER);
-                    } else {
-                        setStatus(total + " video dihapus dari daftar.", Ui.ION);
-                    }
-                    loadLibrary();
-                })
+                .setTitle(title)
+                .setItems(opts, (d, w) -> deleteLibraryTargets(targets, w == 1))
                 .setNegativeButton("Batal", null)
                 .show();
+    }
+
+    void confirmDeleteSelected() {
+        if (libSelected.isEmpty()) return;
+        confirmDeleteTargets(new HashSet<>(libSelected), "Hapus " + libSelected.size() + " video?");
+    }
+
+    void confirmDeleteWatched90() {
+        Set<String> targets = watchedOver90Uris();
+        if (targets.isEmpty()) {
+            setStatus("Belum ada video yang ditonton lebih dari 90%.", Ui.AMBER);
+            return;
+        }
+        confirmDeleteTargets(targets, "Hapus " + targets.size() + " video (>90% ditonton)?");
     }
 
     void bindItem(View v, final int idx) {
